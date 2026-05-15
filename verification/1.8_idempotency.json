@@ -1,0 +1,18 @@
+{
+  "tick1_records": 3,
+  "tick2_records": 3,
+  "tick1_keys": [
+    "1504266202506199272",
+    "1504560480671498260",
+    "1504705726948446349"
+  ],
+  "tick2_keys": [
+    "1504266202506199272",
+    "1504560480671498260",
+    "1504705726948446349"
+  ],
+  "recordsWouldChange": 0,
+  "differences": [],
+  "idempotent": true,
+  "note": "Replace-mode sync returns all records each tick. The platform diffs internally. recordsWouldChange=0 means tick1 and tick2 produce identical change-sets (no drift between ticks)."
+}
