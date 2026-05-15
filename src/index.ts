@@ -55,6 +55,65 @@ const projects = worker.database("projects", {
 	},
 });
 
+// ── Managed database: Hermes Tasks ─────────────────────────────────
+// Stores kanban task state for the Notion ↔ Hermes sync pipeline.
+// Primary key is the kanban task ID (task_id: t_...).
+const tasks = worker.database("tasks", {
+	type: "managed",
+	initialTitle: "Hermes Tasks",
+	primaryKeyProperty: "task_id",
+	schema: {
+		properties: {
+			// Human-readable task title
+			Name: Schema.title(),
+
+			// Kanban task ID (t_...) — primary key
+			task_id: Schema.richText(),
+
+			// Kanban board slug, used for relation lookup to projects
+			board_slug: Schema.richText(),
+
+			// Task lifecycle status — must cover every kanban state
+			status: Schema.select([
+				{ name: "todo" },
+				{ name: "running" },
+				{ name: "blocked" },
+				{ name: "done" },
+				{ name: "cancelled" },
+				{ name: "archived" },
+			]),
+
+			// Assignee handle (profile name)
+			assignee: Schema.richText(),
+
+			// Full task body (markdown, may be long)
+			body: Schema.richText(),
+
+			// Comma-joined parent task IDs
+			parents: Schema.richText(),
+
+			// Comma-joined child task IDs
+			children: Schema.richText(),
+
+			// Task creation timestamp
+			created_at: Schema.date(),
+
+			// Last update timestamp
+			updated_at: Schema.date(),
+
+			// Most recent kanban_complete/block summary
+			latest_summary: Schema.richText(),
+
+			// Dual-property relation to the projects database
+			// Populated via board_slug ↔ projects.kanban_board_slug lookup (see task 2.7)
+			project: Schema.relation("projects", {
+				twoWay: true,
+				relatedPropertyName: "Tasks",
+			}),
+		},
+	},
+});
+
 // ── Constants ──────────────────────────────────────────────────────
 // Discord guild and category IDs (verified 2026-05-15)
 const GUILD_ID = "1503278613120811078"; // AGENTIC-OS council guild
