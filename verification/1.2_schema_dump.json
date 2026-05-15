@@ -1,0 +1,39 @@
+{
+  "sdkVersion": "0.4.0",
+  "databases": [
+    {
+      "key": "projects",
+      "config": {
+        "type": "managed",
+        "initialTitle": "Hermes Projects",
+        "primaryKeyProperty": "discord_channel_id",
+        "schema": {
+          "properties": {
+            "Name": { "type": "title" },
+            "discord_channel_id": { "type": "text" },
+            "discord_topic": { "type": "text" },
+            "kanban_board_slug": { "type": "text" },
+            "kanban_task_ids": { "type": "text" },
+            "status": {
+              "type": "select",
+              "options": [
+                { "name": "Backlog" },
+                { "name": "Planning" },
+                { "name": "In progress" },
+                { "name": "Paused" },
+                { "name": "Done" },
+                { "name": "Cancelled" }
+              ]
+            },
+            "discord_archived": { "type": "checkbox" },
+            "discord_category_id": { "type": "text" },
+            "last_discord_edit": { "type": "date" },
+            "notes": { "type": "text" }
+          }
+        }
+      }
+    }
+  ],
+  "pacers": [],
+  "capabilities": []
+}
