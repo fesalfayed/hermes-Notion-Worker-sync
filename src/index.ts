@@ -57,9 +57,9 @@ const projects = worker.database("projects", {
 
 // ── Constants ──────────────────────────────────────────────────────
 // Discord guild and category IDs (verified 2026-05-15)
-const GUILD_ID = "000000000000000007";
-const PROJECTS_CATEGORY_ID = "000000000000000009"; // Real PROJECTS category (not template stub)
-const ARCHIVE_CATEGORY_ID = ""; // No ARCHIVE category exists in this guild yet
+const GUILD_ID = "000000000000000001"; // AGENTIC-OS council guild
+const PROJECTS_CATEGORY_ID = "000000000000000002"; // PROJECTS category
+const ARCHIVE_CATEGORY_ID = "000000000000000015"; // ARCHIVE category
 
 // ── Rate limiter: Discord API ───────────────────────────────────────
 // Discord global rate limit floor is 50/s per the SDK docs.
