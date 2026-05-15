@@ -1,6 +1,9 @@
 .env
 .env.*
+!.env.example
 dist/
 node_modules/
 workers.*.json
 workers.json
+verification/
+$HERMES_KANBAN_WORKSPACE/
