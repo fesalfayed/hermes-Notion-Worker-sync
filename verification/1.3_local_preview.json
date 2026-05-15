@@ -1,0 +1,49 @@
+{
+  "test_type": "local_preview",
+  "timestamp": "2026-05-15T12:14:00Z",
+  "command": "ntn workers sync trigger projectsFromDiscord --local --preview",
+  "environment": "local (tsx)",
+  "status": "success",
+  "records_would_write": 4,
+  "records": [
+    {
+      "key": "000000000000000010",
+      "Name": "vast-ai",
+      "discord_channel_id": "000000000000000010",
+      "discord_topic": "",
+      "discord_category_id": "000000000000000009",
+      "discord_archived": false
+    },
+    {
+      "key": "000000000000000011",
+      "Name": "local-inference",
+      "discord_channel_id": "000000000000000011",
+      "discord_topic": "",
+      "discord_category_id": "000000000000000009",
+      "discord_archived": false
+    },
+    {
+      "key": "000000000000000012",
+      "Name": "agentic-trading",
+      "discord_channel_id": "000000000000000012",
+      "discord_topic": "",
+      "discord_category_id": "000000000000000009",
+      "discord_archived": false
+    },
+    {
+      "key": "000000000000000013",
+      "Name": "hardware-upgrades",
+      "discord_channel_id": "000000000000000013",
+      "discord_topic": "",
+      "discord_category_id": "000000000000000009",
+      "discord_archived": false
+    }
+  ],
+  "notes": [
+    "Local preview confirms sync execute() logic works correctly",
+    "Discord API call successful (Discord egress working locally)",
+    "4 project channels found in PROJECTS category (not the 2 template IDs from task spec)",
+    "All Discord-owned fields properly mapped",
+    "Kanban-owned fields (status, notes, kanban_task_ids, kanban_board_slug) correctly omitted"
+  ]
+}

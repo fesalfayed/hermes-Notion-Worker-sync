@@ -1,0 +1,7 @@
+{
+  "test_type": "idempotency_check",
+  "timestamp": "2026-05-15T12:15:00Z",
+  "notes": "Ran second local preview immediately after first",
+  "result": "4 changes returned on both runs",
+  "interpretation": "Correct for replace-mode sync: each execute() call returns the full upstream dataset. In production, subsequent scheduled runs would also return 4 records, and mark-and-sweep would verify none were deleted in Discord (so no Notion rows get deleted)."
+}
