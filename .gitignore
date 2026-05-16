@@ -19,9 +19,9 @@ $HERMES_KANBAN_WORKSPACE/
 _archive/
 graphify-out/
 
-# Local scripts & state
-local/state/
-local/test_hook_payload.json
+# Local scripts & state (operational tooling, not part of the worker)
+local/
+tests/
 
 # Agent config (internal)
 .agents/
