@@ -32,7 +32,19 @@ export interface BoardChannelMap {
 }
 
 // ── Default YAML path (project root) ────────────────────────────────
-const DEFAULT_YAML_PATH = resolve(__dirname, "..", "board_channel_map.yaml");
+// Look for the YAML next to the compiled JS (dist/) first; fall back to repo
+// root for `tsx`-based local dev. The build script copies the YAML into dist/
+// so the deployed sandbox bundle includes it (otherwise module-init throws
+// ENOENT inside the Workers runtime).
+const DEFAULT_YAML_PATH = (() => {
+	const bundled = resolve(__dirname, "board_channel_map.yaml");
+	try {
+		readFileSync(bundled, "utf-8");
+		return bundled;
+	} catch {
+		return resolve(__dirname, "..", "board_channel_map.yaml");
+	}
+})();
 
 // ── Loader ──────────────────────────────────────────────────────────
 
