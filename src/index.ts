@@ -56,7 +56,8 @@ const projects = worker.database("projects", {
 });
 
 // ── Managed database: Hermes Tasks ─────────────────────────────────
-// Stores kanban task state for the Notion ↔ Hermes sync pipeline.
+// Sync target for the kanban → Notion mirror. Writes happen exclusively
+// via the tasksBackfill + tasksDelta sync pair (gist as upstream).
 // Primary key is the kanban task ID (task_id: t_...).
 const tasks = worker.database("tasks", {
 	type: "managed",
@@ -64,16 +65,9 @@ const tasks = worker.database("tasks", {
 	primaryKeyProperty: "task_id",
 	schema: {
 		properties: {
-			// Human-readable task title
 			Name: Schema.title(),
-
-			// Kanban task ID (t_...) — primary key
 			task_id: Schema.richText(),
-
-			// Kanban board slug, used for relation lookup to projects
 			board_slug: Schema.richText(),
-
-			// Task lifecycle status — must cover every kanban state
 			status: Schema.select([
 				{ name: "todo" },
 				{ name: "running" },
@@ -82,33 +76,21 @@ const tasks = worker.database("tasks", {
 				{ name: "cancelled" },
 				{ name: "archived" },
 			]),
-
-			// Assignee handle (profile name)
 			assignee: Schema.richText(),
-
-			// Full task body (markdown, may be long)
 			body: Schema.richText(),
-
-			// Comma-joined parent task IDs
 			parents: Schema.richText(),
-
-			// Comma-joined child task IDs
 			children: Schema.richText(),
-
-			// Task creation timestamp
 			created_at: Schema.date(),
-
-			// Last update timestamp
 			updated_at: Schema.date(),
-
-			// Most recent kanban_complete/block summary
 			latest_summary: Schema.richText(),
-
-			// Dual-property relation to the projects database
-			// Populated via board_slug ↔ projects.kanban_board_slug lookup (see task 2.7)
-			project: Schema.relation("projects", {
+			// Two-way relation to the projects DB.
+			// Renamed to `parent_project` (was `project`) to force the Workers
+			// platform to recreate a fresh dual relation pointed at the current
+			// tasks data source — a previous stale `Tasks` back-relation got
+			// pinned to a now-abandoned tasks DS and wouldn't auto-migrate.
+			parent_project: Schema.relation("projects", {
 				twoWay: true,
-				relatedPropertyName: "Tasks",
+				relatedPropertyName: "kanban_tasks",
 			}),
 		},
 	},
@@ -119,6 +101,24 @@ const tasks = worker.database("tasks", {
 const GUILD_ID = "000000000000000001"; // AGENTIC-OS council guild
 const PROJECTS_CATEGORY_ID = "000000000000000002"; // PROJECTS category
 const ARCHIVE_CATEGORY_ID = "000000000000000015"; // ARCHIVE category
+
+// ── Kanban ↔ Discord-channel binding table ──────────────────────────
+// Maps kanban board slug → discord_channel_id of the project that owns it.
+// Used by:
+//   - projectsFromDiscord: to populate `kanban_board_slug` on the project row.
+//   - tasksDelta: to resolve a task's `board_slug` to its project page (for
+//     the two-way `project` relation).
+//
+// To add a new binding: append here and `ntn workers deploy`. The next
+// sync tick picks it up; run `ntn workers sync trigger tasksBackfill`
+// once if you want the relation written on all existing rows immediately.
+const BOARD_TO_CHANNEL: Record<string, string> = {
+	"hermes-projects-sync": "000000000000000014",
+};
+
+const CHANNEL_TO_BOARD: Record<string, string> = Object.fromEntries(
+	Object.entries(BOARD_TO_CHANNEL).map(([slug, ch]) => [ch, slug])
+);
 
 // ── Rate limiter: Discord API ───────────────────────────────────────
 // Discord global rate limit floor is 50/s per the SDK docs.
@@ -185,10 +185,8 @@ worker.sync("projectsFromDiscord", {
 		}
 
 		// Convert each channel to a Notion upsert record
-		const changes = projectChannels.map((channel) => ({
-			type: "upsert" as const,
-			key: channel.id, // Primary key on discord_channel_id
-			properties: {
+		const changes = projectChannels.map((channel) => {
+			const props: Record<string, any> & { discord_channel_id: ReturnType<typeof Builder.richText> } = {
 				Name: Builder.title(channel.name),
 				discord_channel_id: Builder.richText(channel.id),
 				discord_topic: Builder.richText(channel.topic || ""),
@@ -196,10 +194,22 @@ worker.sync("projectsFromDiscord", {
 				discord_archived: Builder.checkbox(
 					channel.parent_id === ARCHIVE_CATEGORY_ID
 				),
-			},
-			// NOTE: We omit kanban_board_slug, kanban_task_ids, status, and notes
-			// because these are Notion-owned and must not be modified by this sync.
-		}));
+			};
+			// Auto-bind kanban_board_slug from the static binding table.
+			// Writing here is safe because the field is only set when this
+			// channel has a known board mapping — other channels leave it untouched.
+			const slug = CHANNEL_TO_BOARD[channel.id];
+			if (slug) {
+				props.kanban_board_slug = Builder.richText(slug);
+			}
+			return {
+				type: "upsert" as const,
+				key: channel.id,
+				properties: props,
+			};
+			// NOTE: We still omit kanban_task_ids, status, and notes —
+			// those are Notion-owned and must not be modified by this sync.
+		});
 
 		return {
 			changes,
@@ -501,247 +511,6 @@ worker.tool("unarchiveProject", {
 	},
 });
 
-// Tool: upsertTask
-// Accepts full task JSON from local kanban hook, creates or updates a row in the Notion tasks database.
-// This is the real-time delta path — local kanban hook (card 2.3) fires this on every state transition.
-worker.tool("upsertTask", {
-	title: "Upsert Kanban Task",
-	description:
-		"Create or update a kanban task row in the Hermes Tasks database. " +
-		"Fired by the local kanban hook on every task state transition.",
-	schema: j.object({
-		task_id: j
-			.string()
-			.describe("Kanban task ID in t_xxxx format (must match /^t_[a-f0-9]+$/)."),
-		board_slug: j.string().describe("Kanban board slug."),
-		name: j
-			.string()
-			.describe("Task title (1-2000 chars)."),
-		status: j
-			.enum("todo", "running", "blocked", "done", "cancelled", "archived")
-			.describe("Task lifecycle status."),
-		assignee: j.string().nullable().describe("Assignee profile handle."),
-		body: j
-			.string()
-			.describe("Full task body (markdown, may be long, max 50000 chars)."),
-		parents: j
-			.array(j.string())
-			.describe("Array of parent task IDs (empty if none)."),
-		children: j
-			.array(j.string())
-			.describe("Array of child task IDs (empty if none)."),
-		created_at: j.string().describe("ISO 8601 creation timestamp."),
-		updated_at: j.string().describe("ISO 8601 last-update timestamp."),
-		latest_summary: j
-			.string()
-			.nullable()
-			.describe("Most recent kanban_complete/block summary."),
-	}),
-	outputSchema: j.object({
-		ok: j.boolean(),
-		action: j.string().nullable(),
-		task_id: j.string(),
-		page_id: j.string().nullable(),
-		error: j.string().nullable(),
-	}),
-	hints: { readOnlyHint: false },
-	execute: async (input, { notion }) => {
-		const tasksDatabaseId = process.env.NOTION_TASKS_DATABASE_ID;
-		const notionToken = process.env.NOTION_API_TOKEN;
-
-		// Validate task_id format
-		if (!/^t_[a-f0-9]+$/.test(input.task_id)) {
-			return {
-				ok: false,
-				action: null,
-				task_id: input.task_id,
-				page_id: null,
-				error: `Invalid task_id format: must match /^t_[a-f0-9]+$/`,
-			};
-		}
-
-		if (!tasksDatabaseId) {
-			return {
-				ok: false,
-				action: null,
-				task_id: input.task_id,
-				page_id: null,
-				error: "NOTION_TASKS_DATABASE_ID not configured",
-			};
-		}
-
-		// Notion richText has a 2000-char limit per text block.
-		// Truncate body if it exceeds this to avoid API errors.
-		const MAX_RICH_TEXT = 2000;
-		const truncatedBody =
-			input.body.length > MAX_RICH_TEXT
-				? input.body.slice(0, MAX_RICH_TEXT - 3) + "..."
-				: input.body;
-
-		// Convert arrays to comma-joined strings for richText storage
-		const parentsStr = input.parents.join(",");
-		const childrenStr = input.children.join(",");
-
-		// Helper: build Notion richText property value
-		const richText = (text: string) => ({
-			rich_text: text
-				? [{ text: { content: text } }]
-				: [],
-		});
-
-		// Helper: build Notion title property value
-		const title = (text: string) => ({
-			title: [{ text: { content: text } }],
-		});
-
-		// Helper: build Notion select property value
-		const select = (name: string) => ({
-			select: { name },
-		});
-
-		// Helper: build Notion date property value from ISO string
-		const date = (iso: string) => ({
-			date: iso ? { start: iso } : null,
-		});
-
-		// Build the properties payload (excluding 'project' relation — owned by 2.7)
-		const properties: Record<string, any> = {
-			Name: title(input.name),
-			task_id: richText(input.task_id),
-			board_slug: richText(input.board_slug),
-			status: select(input.status),
-			assignee: richText(input.assignee ?? ""),
-			body: richText(truncatedBody),
-			parents: richText(parentsStr),
-			children: richText(childrenStr),
-			created_at: date(input.created_at),
-			updated_at: date(input.updated_at),
-			latest_summary: richText(input.latest_summary ?? ""),
-		};
-
-		try {
-			// Build auth headers — use context.notion if available (deployed), fall back to env var
-			const authHeaders: Record<string, string> = {
-				"Content-Type": "application/json",
-				"Notion-Version": "2022-06-28",
-			};
-			if (notionToken) {
-				authHeaders["Authorization"] = `Bearer ${notionToken}`;
-			}
-
-			// Step 1: Query tasks database for existing row with this task_id
-			const queryResponse = await fetch(
-				`https://api.notion.com/v1/databases/${tasksDatabaseId}/query`,
-				{
-					method: "POST",
-					headers: authHeaders,
-					body: JSON.stringify({
-						filter: {
-							property: "task_id",
-							rich_text: {
-								equals: input.task_id,
-							},
-						},
-					}),
-				}
-			);
-
-			if (!queryResponse.ok) {
-				const errBody = await queryResponse.text();
-				return {
-					ok: false,
-					action: null,
-					task_id: input.task_id,
-					page_id: null,
-					error: `Notion query failed: ${queryResponse.status} ${errBody}`,
-				};
-			}
-
-			const queryData = (await queryResponse.json()) as {
-				results: Array<{ id: string; properties: Record<string, any> }>;
-			};
-
-			if (queryData.results.length > 0) {
-				// ── UPDATE existing page ──
-				const existingPage = queryData.results[0];
-				const pageId = existingPage.id;
-
-				// Preserve existing 'project' relation if set — don't clobber it
-				// (project binding is owned by task 2.7)
-
-				const updateResponse = await fetch(
-					`https://api.notion.com/v1/pages/${pageId}`,
-					{
-						method: "PATCH",
-						headers: authHeaders,
-						body: JSON.stringify({ properties }),
-					}
-				);
-
-				if (!updateResponse.ok) {
-					const errBody = await updateResponse.text();
-					return {
-						ok: false,
-						action: "updated",
-						task_id: input.task_id,
-						page_id: pageId,
-						error: `Notion update failed: ${updateResponse.status} ${errBody}`,
-					};
-				}
-
-				return {
-					ok: true,
-					action: "updated",
-					task_id: input.task_id,
-					page_id: pageId,
-					error: null,
-				};
-			} else {
-				// ── CREATE new page ──
-				// Leave 'project' relation empty — binding happens in 2.7
-				const createResponse = await fetch(
-					"https://api.notion.com/v1/pages",
-					{
-						method: "POST",
-						headers: authHeaders,
-						body: JSON.stringify({
-							parent: { database_id: tasksDatabaseId },
-							properties,
-						}),
-					}
-				);
-
-				if (!createResponse.ok) {
-					const errBody = await createResponse.text();
-					return {
-						ok: false,
-						action: "created",
-						task_id: input.task_id,
-						page_id: null,
-						error: `Notion create failed: ${createResponse.status} ${errBody}`,
-					};
-				}
-
-				const createdPage = (await createResponse.json()) as { id: string };
-				return {
-					ok: true,
-					action: "created",
-					task_id: input.task_id,
-					page_id: createdPage.id,
-					error: null,
-				};
-			}
-		} catch (err) {
-			return {
-				ok: false,
-				action: null,
-				task_id: input.task_id,
-				page_id: null,
-				error: `Exception: ${err instanceof Error ? err.message : String(err)}`,
-			};
-		}
-	},
-});
 
 // Tool: rebindByChannelId
 // Re-anchors a Notion row to its Discord channel by discord_channel_id.
@@ -972,321 +741,318 @@ worker.tool("rebindByChannelId", {
 	},
 });
 
-// ── Sync: tasksReconciliation ───────────────────────────────────────
-// 30-min backstop that pulls the full kanban snapshot from a private
-// GitHub gist and upserts every task into the Notion tasks database.
-//
-// Mode: incremental (NOT replace — we preserve history and only emit
-// explicit deletes when the gist marks a task as gc'd).
-// This catches drift missed by the real-time delta path (2.3).
-//
-// Gist shape: { version, board, generated_at, tasks: [{ task_id, board_slug,
-//   name, status, assignee, body, parents, children, created_at, updated_at,
-//   latest_summary }] }
 
-// Helper: truncate richText to Notion's 2000-char limit per block
+// Tool: bindProjectToBoard
+// One-shot: populates kanban_board_slug on the project row and re-links
+// every task row in the board to the project via the `project` relation.
+worker.tool("bindProjectToBoard", {
+	title: "Bind Project to Kanban Board",
+	description:
+		"Populate kanban_board_slug on a project row and auto-relate all tasks " +
+		"in that board to the project. Use after initial board creation or when " +
+		"the binding drifts. Overwrites existing project relations on task rows.",
+	schema: j.object({
+		discord_channel_id: j
+			.string()
+			.describe("Discord channel ID identifying the project row"),
+		board_slug: j
+			.string()
+			.describe("The kanban board slug to bind (e.g. 'hermes-projects-sync')"),
+	}),
+	outputSchema: j.object({
+		ok: j.boolean(),
+		project_page_id: j.string().nullable(),
+		tasks_relinked: j.number().nullable(),
+		error: j.string().nullable(),
+	}),
+	hints: { readOnlyHint: false },
+	execute: async ({ discord_channel_id, board_slug }, { notion }) => {
+		const notionToken = process.env.NOTION_API_TOKEN;
+		const projectsDatabaseId = process.env.NOTION_PROJECTS_DATABASE_ID;
+		const tasksDatabaseId = process.env.NOTION_TASKS_DATABASE_ID;
+
+		if (!notionToken) {
+			return { ok: false, project_page_id: null, tasks_relinked: null, error: "NOTION_API_TOKEN not configured" };
+		}
+		if (!projectsDatabaseId) {
+			return { ok: false, project_page_id: null, tasks_relinked: null, error: "NOTION_PROJECTS_DATABASE_ID not configured" };
+		}
+		if (!tasksDatabaseId) {
+			return { ok: false, project_page_id: null, tasks_relinked: null, error: "NOTION_TASKS_DATABASE_ID not configured" };
+		}
+
+		const notionHeaders = {
+			Authorization: `Bearer ${notionToken}`,
+			"Content-Type": "application/json",
+			"Notion-Version": "2026-02-15",
+		};
+
+		try {
+			// Step 1: Query projects DB for the row matching discord_channel_id -> get page ID.
+			const projectQueryRes = await fetch(
+				`https://api.notion.com/v1/databases/${projectsDatabaseId}/query`,
+				{
+					method: "POST",
+					headers: notionHeaders,
+					body: JSON.stringify({
+						filter: {
+							property: "discord_channel_id",
+							rich_text: { equals: discord_channel_id },
+						},
+					}),
+				}
+			);
+
+			if (!projectQueryRes.ok) {
+				return {
+					ok: false,
+					project_page_id: null,
+					tasks_relinked: null,
+					error: `Projects DB query failed: ${projectQueryRes.status} ${await projectQueryRes.text()}`,
+				};
+			}
+
+			const projectData = (await projectQueryRes.json()) as any;
+			if (!projectData.results || projectData.results.length === 0) {
+				return {
+					ok: false,
+					project_page_id: null,
+					tasks_relinked: null,
+					error: `No project row found with discord_channel_id=${discord_channel_id}`,
+				};
+			}
+
+			const projectPageId = projectData.results[0].id as string;
+
+			// Step 2: PATCH the project page with kanban_board_slug = board_slug.
+			const patchProjectRes = await fetch(
+				`https://api.notion.com/v1/pages/${projectPageId}`,
+				{
+					method: "PATCH",
+					headers: notionHeaders,
+					body: JSON.stringify({
+						properties: {
+							kanban_board_slug: {
+								rich_text: [{ text: { content: board_slug } }],
+							},
+						},
+					}),
+				}
+			);
+
+			if (!patchProjectRes.ok) {
+				return {
+					ok: false,
+					project_page_id: projectPageId,
+					tasks_relinked: null,
+					error: `Failed to patch project kanban_board_slug: ${patchProjectRes.status} ${await patchProjectRes.text()}`,
+				};
+			}
+
+			// Step 3: Query tasks DB for ALL rows where board_slug == input.board_slug.
+			// Paginate in case there are >100 tasks.
+			const taskPages: any[] = [];
+			let hasMore = true;
+			let startCursor: string | undefined;
+
+			while (hasMore) {
+				const body: any = {
+					filter: {
+						property: "board_slug",
+						rich_text: { equals: board_slug },
+					},
+					page_size: 100,
+				};
+				if (startCursor) body.start_cursor = startCursor;
+
+				const tasksQueryRes = await fetch(
+					`https://api.notion.com/v1/databases/${tasksDatabaseId}/query`,
+					{
+						method: "POST",
+						headers: notionHeaders,
+						body: JSON.stringify(body),
+					}
+				);
+
+				if (!tasksQueryRes.ok) {
+					return {
+						ok: false,
+						project_page_id: projectPageId,
+						tasks_relinked: null,
+						error: `Tasks DB query failed: ${tasksQueryRes.status} ${await tasksQueryRes.text()}`,
+					};
+				}
+
+				const tasksData = (await tasksQueryRes.json()) as any;
+				taskPages.push(...(tasksData.results ?? []));
+				hasMore = tasksData.has_more ?? false;
+				startCursor = tasksData.next_cursor ?? undefined;
+			}
+
+			// Step 4: For each task row, PATCH its project relation to point at the project page.
+			let relinked = 0;
+			for (const taskPage of taskPages) {
+				const patchTaskRes = await fetch(
+					`https://api.notion.com/v1/pages/${taskPage.id}`,
+					{
+						method: "PATCH",
+						headers: notionHeaders,
+						body: JSON.stringify({
+							properties: {
+								project: {
+									relation: [{ id: projectPageId }],
+								},
+							},
+						}),
+					}
+				);
+
+				if (patchTaskRes.ok) {
+					relinked++;
+				} else {
+					// Log but continue - partial success is better than aborting.
+					console.warn(
+						`bindProjectToBoard: failed to patch task ${taskPage.id}: ${patchTaskRes.status}`
+					);
+				}
+			}
+
+			return {
+				ok: true,
+				project_page_id: projectPageId,
+				tasks_relinked: relinked,
+				error: null,
+			};
+		} catch (err) {
+			return {
+				ok: false,
+				project_page_id: null,
+				tasks_relinked: null,
+				error: `Exception: ${err instanceof Error ? err.message : String(err)}`,
+			};
+		}
+	},
+});
+
+
+// ── Helpers for gist-backed task syncs ──────────────────────────────
+type GistTask = {
+	task_id: string;
+	board_slug: string;
+	name: string;
+	status: string;
+	assignee: string | null;
+	body: string;
+	parents: string[];
+	children: string[];
+	created_at: string;
+	updated_at: string;
+	latest_summary: string | null;
+	"gc'd"?: boolean;
+};
+
+type GistSnapshot = {
+	version: number;
+	board: string;
+	generated_at: string;
+	tasks: GistTask[];
+};
+
 function truncate(text: string | null | undefined, max = 2000): string {
 	if (!text) return "";
 	return text.length > max ? text.slice(0, max - 3) + "..." : text;
 }
 
-worker.sync("tasksReconciliation", {
+async function fetchGistSnapshot(): Promise<GistSnapshot> {
+	const gistUrl = process.env.KANBAN_GIST_URL;
+	const githubToken = process.env.GITHUB_TOKEN;
+	if (!gistUrl) throw new Error("KANBAN_GIST_URL not configured");
+	if (!githubToken) throw new Error("GITHUB_TOKEN not configured");
+
+	await githubPacer.wait();
+	const res = await fetch(gistUrl, {
+		headers: {
+			Authorization: `token ${githubToken}`,
+			Accept: "application/json",
+		},
+	});
+	if (!res.ok) {
+		throw new Error(`Gist fetch failed: ${res.status} ${res.statusText}`);
+	}
+	return (await res.json()) as GistSnapshot;
+}
+
+function taskToChange(t: GistTask) {
+	const isGcd = t["gc'd"] === true;
+	const channelId = BOARD_TO_CHANNEL[t.board_slug];
+	return {
+		type: "upsert" as const,
+		key: t.task_id,
+		properties: {
+			Name: Builder.title(t.name),
+			task_id: Builder.richText(t.task_id),
+			board_slug: Builder.richText(t.board_slug),
+			status: Builder.select(isGcd ? "archived" : t.status),
+			assignee: Builder.richText(t.assignee ?? ""),
+			body: Builder.richText(truncate(t.body)),
+			parents: Builder.richText(t.parents.join(",")),
+			children: Builder.richText(t.children.join(",")),
+			created_at: Builder.date(t.created_at.slice(0, 10)),
+			updated_at: Builder.date(t.updated_at.slice(0, 10)),
+			latest_summary: Builder.richText(
+				isGcd && !t.latest_summary
+					? "tombstoned: kanban gc"
+					: truncate(t.latest_summary)
+			),
+			// parent_project relation (renamed from `project` mid-build to force fresh dual relation).
+			parent_project: channelId ? [Builder.relation(channelId)] : [],
+		},
+	};
+}
+
+// ── Sync: tasksBackfill ──────────────────────────────────────────────
+// Replace-mode, manual trigger. Drains the full gist snapshot into the
+// tasks DB. Run manually to recover from drift, backfill new properties,
+// or sweep tombstones the delta path may have missed.
+worker.sync("tasksBackfill", {
 	database: tasks,
-	mode: "incremental",
-	schedule: "30m",
-	execute: async (state) => {
-		// ── 1. Validate env ──────────────────────────────────────────
-		const gistUrl = process.env.KANBAN_GIST_URL;
-		const githubToken = process.env.GITHUB_TOKEN;
-
-		if (!gistUrl) {
-			throw new Error(
-				"KANBAN_GIST_URL not configured — push via `ntn workers env push`"
-			);
-		}
-		if (!githubToken) {
-			throw new Error(
-				"GITHUB_TOKEN not configured — push via `ntn workers env push`"
-			);
-		}
-
-		// ── 2. Fetch gist snapshot ───────────────────────────────────
-		await githubPacer.wait();
-		const gistRes = await fetch(gistUrl, {
-			method: "GET",
-			headers: {
-				Authorization: `token ${githubToken}`,
-				Accept: "application/json",
-			},
-		});
-
-		if (!gistRes.ok) {
-			throw new Error(
-				`GitHub gist fetch failed: ${gistRes.status} ${gistRes.statusText}`
-			);
-		}
-
-		const snapshot = (await gistRes.json()) as {
-			version: number;
-			board: string;
-			generated_at: string;
-			tasks: Array<{
-				task_id: string;
-				board_slug: string;
-				name: string;
-				status: string;
-				assignee: string | null;
-				body: string;
-				parents: string[];
-				children: string[];
-				created_at: string;
-				updated_at: string;
-				latest_summary: string | null;
-				"gc'd"?: boolean;
-			}>;
-		};
-
-		// ── 3. Safety guard: abort on empty/corrupt gist ─────────────
+	mode: "replace",
+	schedule: "manual",
+	execute: async () => {
+		const snapshot = await fetchGistSnapshot();
 		if (!snapshot.tasks || snapshot.tasks.length < 1) {
-			// Return no changes — do NOT throw. Throwing would retry
-			// indefinitely; returning empty changes is a safe no-op.
-			console.warn(
-				`tasksReconciliation: gist has ${snapshot.tasks?.length ?? 0} tasks — aborting (possible corruption).`
-			);
+			console.warn("tasksBackfill: empty gist — aborting to avoid mass-delete.");
 			return { changes: [], hasMore: false };
 		}
-
-		// ── 4. Map tasks to sync changes ─────────────────────────────
-		const changes = [];
-
-		for (const task of snapshot.tasks) {
-			// If the gist marks this task as gc'd, emit a delete
-			if (task["gc'd"] === true) {
-				changes.push({
-					type: "delete" as const,
-					key: task.task_id,
-				});
-				continue;
-			}
-
-			// Map to Notion properties — same schema as tasks database
-			changes.push({
-				type: "upsert" as const,
-				key: task.task_id,
-				properties: {
-					Name: Builder.title(truncate(task.name, 2000)),
-					task_id: Builder.richText(task.task_id),
-					board_slug: Builder.richText(task.board_slug || ""),
-					status: Builder.select(task.status),
-					assignee: Builder.richText(task.assignee || ""),
-					body: Builder.richText(truncate(task.body, 2000)),
-					parents: Builder.richText(
-						Array.isArray(task.parents)
-							? task.parents.join(",")
-							: ""
-					),
-					children: Builder.richText(
-						Array.isArray(task.children)
-							? task.children.join(",")
-							: ""
-					),
-					created_at: Builder.dateTime(task.created_at),
-					updated_at: Builder.dateTime(task.updated_at),
-					latest_summary: Builder.richText(
-						truncate(task.latest_summary, 2000)
-					),
-				},
-				// Use updated_at for conflict resolution when the delta
-				// sync (2.3) writes to the same row. The most recent
-				// upstreamUpdatedAt wins.
-				upstreamUpdatedAt: task.updated_at,
-			});
-		}
-
 		return {
-			changes,
+			changes: snapshot.tasks.map(taskToChange),
 			hasMore: false,
 		};
 	},
 });
 
-
-// Tool: tombstoneTask
-// Soft-deletes a task row in Notion by flipping status to "archived" and
-// stamping a tombstone message. Preserves the row for historical queries.
-worker.tool("tombstoneTask", {
-	title: "Tombstone Task",
-	description:
-		"Soft-delete a task in Notion by setting status to archived and stamping a tombstone reason. Preserves the audit trail — does NOT delete the Notion page.",
-	schema: j.object({
-		task_id: j.string().describe("The kanban task ID (t_...) to tombstone"),
-		reason: j
-			.string()
-			.nullable()
-			.describe(
-				"Optional human-readable reason for tombstoning (default: 'kanban gc')"
-			),
-	}),
-	outputSchema: j.object({
-		ok: j.boolean(),
-		action: j.string().nullable(),
-		error: j.string().nullable(),
-		task_id: j.string(),
-		page_id: j.string().nullable(),
-	}),
-	hints: { readOnlyHint: false },
-	execute: async ({ task_id, reason }) => {
-		const notionToken = process.env.NOTION_API_TOKEN;
-		const tasksDatabaseId = process.env.NOTION_TASKS_DATABASE_ID;
-
-		if (!notionToken) {
-			return {
-				ok: false,
-				action: null,
-				error: "NOTION_API_TOKEN not configured",
-				task_id,
-				page_id: null,
-			};
+// ── Sync: tasksDelta ─────────────────────────────────────────────────
+// Incremental, 1m schedule. Filters to tasks whose updated_at > last
+// snapshot generated_at we processed. Upserts only — deletes are
+// handled out-of-band by tasksBackfill.
+worker.sync("tasksDelta", {
+	database: tasks,
+	mode: "incremental",
+	schedule: "1m",
+	execute: async (state) => {
+		const snapshot = await fetchGistSnapshot();
+		if (!snapshot.tasks || snapshot.tasks.length < 1) {
+			return { changes: [], hasMore: false };
 		}
-
-		if (!tasksDatabaseId) {
-			return {
-				ok: false,
-				action: null,
-				error: "NOTION_TASKS_DATABASE_ID not configured",
-				task_id,
-				page_id: null,
-			};
-		}
-
-		try {
-			// Step 1: Query the tasks database for the row matching task_id
-			const queryResponse = await fetch(
-				`https://api.notion.com/v1/databases/${tasksDatabaseId}/query`,
-				{
-					method: "POST",
-					headers: {
-						Authorization: `Bearer ${notionToken}`,
-						"Content-Type": "application/json",
-						"Notion-Version": "2026-02-15",
-					},
-					body: JSON.stringify({
-						filter: {
-							property: "task_id",
-							rich_text: {
-								equals: task_id,
-							},
-						},
-					}),
-				}
-			);
-
-			if (!queryResponse.ok) {
-				return {
-					ok: false,
-					action: null,
-					error: `Notion API query failed: ${queryResponse.status}`,
-					task_id,
-					page_id: null,
-				};
-			}
-
-			const queryData = await queryResponse.json();
-
-			// Step 2: If not found, return error
-			if (!queryData.results || queryData.results.length === 0) {
-				return {
-					ok: false,
-					action: null,
-					error: "no_task_row_matches",
-					task_id,
-					page_id: null,
-				};
-			}
-
-			const page = queryData.results[0];
-			const pageId = page.id;
-
-			// Step 3: Check if already archived (idempotent)
-			const currentStatus = page.properties?.status;
-			if (
-				currentStatus?.type === "select" &&
-				currentStatus.select?.name === "archived"
-			) {
-				return {
-					ok: true,
-					action: "already_tombstoned",
-					error: null,
-					task_id,
-					page_id: pageId,
-				};
-			}
-
-			// Step 4: PATCH the page — status → archived, latest_summary → tombstoned reason, updated_at → now
-			const tombstoneMessage = `tombstoned: ${reason ?? "kanban gc"}`;
-			const now = new Date().toISOString();
-
-			const patchResponse = await fetch(
-				`https://api.notion.com/v1/pages/${pageId}`,
-				{
-					method: "PATCH",
-					headers: {
-						Authorization: `Bearer ${notionToken}`,
-						"Content-Type": "application/json",
-						"Notion-Version": "2026-02-15",
-					},
-					body: JSON.stringify({
-						properties: {
-							status: {
-								select: {
-									name: "archived",
-								},
-							},
-							latest_summary: {
-								rich_text: [
-									{
-										text: {
-											content: tombstoneMessage,
-										},
-									},
-								],
-							},
-							updated_at: {
-								date: {
-									start: now,
-								},
-							},
-						},
-					}),
-				}
-			);
-
-			if (!patchResponse.ok) {
-				const body = await patchResponse.text();
-				return {
-					ok: false,
-					action: null,
-					error: `Notion API patch failed: ${patchResponse.status} ${body}`,
-					task_id,
-					page_id: pageId,
-				};
-			}
-
-			return {
-				ok: true,
-				action: "tombstoned",
-				error: null,
-				task_id,
-				page_id: pageId,
-			};
-		} catch (err) {
-			return {
-				ok: false,
-				action: null,
-				error: `Exception: ${err instanceof Error ? err.message : String(err)}`,
-				task_id,
-				page_id: null,
-			};
-		}
+		const lastSeen = (state as { last_generated_at?: string } | undefined)
+			?.last_generated_at;
+		const changed = lastSeen
+			? snapshot.tasks.filter((t) => t.updated_at > lastSeen)
+			: snapshot.tasks;
+		return {
+			changes: changed.map(taskToChange),
+			hasMore: false,
+			nextState: { last_generated_at: snapshot.generated_at },
+		};
 	},
 });
