@@ -1,0 +1,26 @@
+# Board-to-Channel Mapping Registry
+# ===================================
+# Maps kanban board slugs to their owning Discord channel IDs.
+# Used by projectsFromDiscord (to populate kanban_board_slug) and
+# tasksDelta/tasksBackfill (to resolve parent_project relations).
+#
+# Schema:
+#   boards:
+#     <board-slug>:
+#       channel_id: "<discord-channel-snowflake>"
+#       required: true|false   # If true, worker refuses to boot when channel 404s
+#
+# To add a new board:
+#   1. Add an entry below
+#   2. Rebuild: npm run build
+#   3. Deploy: ntn workers deploy
+#   4. Optionally backfill: ntn workers sync trigger tasksBackfill
+#
+# To discover mappings automatically:
+#   npx tsx scripts/seed-board-map.ts
+#   (Emits YAML to stdout — review before committing)
+
+boards:
+  hermes-projects-sync:
+    channel_id: "000000000000000014"
+    required: true

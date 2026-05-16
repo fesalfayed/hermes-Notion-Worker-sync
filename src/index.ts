@@ -2,6 +2,7 @@ import { Worker } from "@notionhq/workers";
 import * as Schema from "@notionhq/workers/schema";
 import * as Builder from "@notionhq/workers/builder";
 import { j } from "@notionhq/workers/schema-builder";
+import { loadBoardChannelMap, loadRawConfig, validateBoardChannelMap } from "./boardChannelMap.js";
 
 const worker = new Worker();
 export default worker;
@@ -103,22 +104,17 @@ const PROJECTS_CATEGORY_ID = "000000000000000002"; // PROJECTS category
 const ARCHIVE_CATEGORY_ID = "000000000000000015"; // ARCHIVE category
 
 // ── Kanban ↔ Discord-channel binding table ──────────────────────────
+// Config-driven registry loaded from board_channel_map.yaml (project root).
 // Maps kanban board slug → discord_channel_id of the project that owns it.
 // Used by:
 //   - projectsFromDiscord: to populate `kanban_board_slug` on the project row.
 //   - tasksDelta: to resolve a task's `board_slug` to its project page (for
 //     the two-way `project` relation).
 //
-// To add a new binding: append here and `ntn workers deploy`. The next
-// sync tick picks it up; run `ntn workers sync trigger tasksBackfill`
-// once if you want the relation written on all existing rows immediately.
-const BOARD_TO_CHANNEL: Record<string, string> = {
-	"hermes-projects-sync": "000000000000000014",
-};
-
-const CHANNEL_TO_BOARD: Record<string, string> = Object.fromEntries(
-	Object.entries(BOARD_TO_CHANNEL).map(([slug, ch]) => [ch, slug])
-);
+// To add a new binding: edit board_channel_map.yaml, rebuild, and deploy.
+// To discover mappings: npx tsx scripts/seed-board-map.ts
+const { boardToChannel: BOARD_TO_CHANNEL, channelToBoard: CHANNEL_TO_BOARD } =
+	loadBoardChannelMap();
 
 // ── Rate limiter: Discord API ───────────────────────────────────────
 // Discord global rate limit floor is 50/s per the SDK docs.
