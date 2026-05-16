@@ -1,3 +1,5 @@
+> **Historical:** This document captures an internal project phase. It is preserved for context but does not reflect current behavior. See [README](../../README.md) and [CHANGELOG](../../CHANGELOG.md) for current state.
+
 # hermes-projects-sync — Checkpoint (2026-05-15)
 
 End-of-Phase-2 snapshot. Captures shipped architecture, what's deployed, and the open scope for Phase 3.
