@@ -595,14 +595,16 @@ worker.tool("rebindByChannelId", {
 
 			// Step 2: Query Notion projects database for the row matching discord_channel_id
 			// Get the Notion API token and database ID
-			const projectsDatabaseId = process.env.NOTION_PROJECTS_DATABASE_ID;
+			const projectsDatabaseId = process.env.PROJECTS_DATABASE_ID;
+
+			const projectsDataSourceId = process.env.PROJECTS_DATA_SOURCE_ID;
 			const notionToken = process.env.NOTION_API_TOKEN;
 
 			if (!projectsDatabaseId || !notionToken) {
 				return {
 					ok: false,
 					action: null,
-					error: !projectsDatabaseId ? "NOTION_PROJECTS_DATABASE_ID not configured" : "NOTION_API_TOKEN not configured",
+					error: !projectsDatabaseId ? "PROJECTS_DATABASE_ID not configured" : "NOTION_API_TOKEN not configured",
 					before: null,
 					after: null,
 				};
@@ -610,13 +612,13 @@ worker.tool("rebindByChannelId", {
 
 			// Use REST API to query the Notion database
 			const notionResponse = await fetch(
-				`https://api.notion.com/v1/databases/${projectsDatabaseId}/query`,
+				`https://api.notion.com/v1/data_sources/${projectsDataSourceId}/query`,
 				{
 					method: "POST",
 					headers: {
 						Authorization: `Bearer ${notionToken}`,
 						"Content-Type": "application/json",
-						"Notion-Version": "2026-02-15",
+						"Notion-Version": "2025-09-03",
 					},
 					body: JSON.stringify({
 						filter: {
@@ -694,7 +696,7 @@ worker.tool("rebindByChannelId", {
 					headers: {
 						Authorization: `Bearer ${notionToken}`,
 						"Content-Type": "application/json",
-						"Notion-Version": "2026-02-15",
+						"Notion-Version": "2025-09-03",
 					},
 					body: JSON.stringify({
 						properties: {
@@ -780,29 +782,32 @@ worker.tool("bindProjectToBoard", {
 	hints: { readOnlyHint: false },
 	execute: async ({ discord_channel_id, board_slug }, { notion }) => {
 		const notionToken = process.env.NOTION_API_TOKEN;
-		const projectsDatabaseId = process.env.NOTION_PROJECTS_DATABASE_ID;
-		const tasksDatabaseId = process.env.NOTION_TASKS_DATABASE_ID;
+		const projectsDatabaseId = process.env.PROJECTS_DATABASE_ID;
+
+		const projectsDataSourceId = process.env.PROJECTS_DATA_SOURCE_ID;
+		const tasksDatabaseId = process.env.TASKS_DATABASE_ID;
+		const tasksDataSourceId = process.env.TASKS_DATA_SOURCE_ID;
 
 		if (!notionToken) {
 			return { ok: false, project_page_id: null, tasks_relinked: null, error: "NOTION_API_TOKEN not configured" };
 		}
-		if (!projectsDatabaseId) {
-			return { ok: false, project_page_id: null, tasks_relinked: null, error: "NOTION_PROJECTS_DATABASE_ID not configured" };
+		if (!projectsDatabaseId || !projectsDataSourceId) {
+			return { ok: false, project_page_id: null, tasks_relinked: null, error: "PROJECTS_DATABASE_ID / PROJECTS_DATA_SOURCE_ID not configured" };
 		}
-		if (!tasksDatabaseId) {
-			return { ok: false, project_page_id: null, tasks_relinked: null, error: "NOTION_TASKS_DATABASE_ID not configured" };
+		if (!tasksDatabaseId || !tasksDataSourceId) {
+			return { ok: false, project_page_id: null, tasks_relinked: null, error: "TASKS_DATABASE_ID / TASKS_DATA_SOURCE_ID not configured" };
 		}
 
 		const notionHeaders = {
 			Authorization: `Bearer ${notionToken}`,
 			"Content-Type": "application/json",
-			"Notion-Version": "2026-02-15",
+			"Notion-Version": "2025-09-03",
 		};
 
 		try {
 			// Step 1: Query projects DB for the row matching discord_channel_id -> get page ID.
 			const projectQueryRes = await fetch(
-				`https://api.notion.com/v1/databases/${projectsDatabaseId}/query`,
+				`https://api.notion.com/v1/data_sources/${projectsDataSourceId}/query`,
 				{
 					method: "POST",
 					headers: notionHeaders,
@@ -878,7 +883,7 @@ worker.tool("bindProjectToBoard", {
 				if (startCursor) body.start_cursor = startCursor;
 
 				const tasksQueryRes = await fetch(
-					`https://api.notion.com/v1/databases/${tasksDatabaseId}/query`,
+					`https://api.notion.com/v1/data_sources/${tasksDataSourceId}/query`,
 					{
 						method: "POST",
 						headers: notionHeaders,
@@ -978,10 +983,11 @@ worker.tool("upsertTask", {
 	}),
 	hints: { readOnlyHint: false },
 	execute: async (input, { notion }) => {
-		const tasksDatabaseId = process.env.NOTION_TASKS_DATABASE_ID;
+		const tasksDatabaseId = process.env.TASKS_DATABASE_ID;
+		const tasksDataSourceId = process.env.TASKS_DATA_SOURCE_ID;
 
-		if (!tasksDatabaseId) {
-			return { ok: false, action: null, task_id: null, error: "NOTION_TASKS_DATABASE_ID not configured" };
+		if (!tasksDatabaseId || !tasksDataSourceId) {
+			return { ok: false, action: null, task_id: null, error: "TASKS_DATABASE_ID / TASKS_DATA_SOURCE_ID not configured" };
 		}
 
 		try {
@@ -1000,7 +1006,7 @@ worker.tool("upsertTask", {
 				latest_summary: input.latest_summary ?? null,
 			};
 
-			const result = await upsertTaskViaNotion(notion, tasksDatabaseId, gistTask);
+			const result = await upsertTaskViaNotion(notion, tasksDatabaseId, tasksDataSourceId, gistTask);
 			return {
 				ok: true,
 				action: result.action,
@@ -1040,14 +1046,15 @@ worker.tool("tombstoneTask", {
 	}),
 	hints: { readOnlyHint: false },
 	execute: async ({ task_id }, { notion }) => {
-		const tasksDatabaseId = process.env.NOTION_TASKS_DATABASE_ID;
+		const tasksDatabaseId = process.env.TASKS_DATABASE_ID;
+		const tasksDataSourceId = process.env.TASKS_DATA_SOURCE_ID;
 
-		if (!tasksDatabaseId) {
-			return { ok: false, action: null, task_id: null, error: "NOTION_TASKS_DATABASE_ID not configured" };
+		if (!tasksDatabaseId || !tasksDataSourceId) {
+			return { ok: false, action: null, task_id: null, error: "TASKS_DATABASE_ID / TASKS_DATA_SOURCE_ID not configured" };
 		}
 
 		try {
-			const result = await tombstoneTaskViaNotion(notion, tasksDatabaseId, task_id);
+			const result = await tombstoneTaskViaNotion(notion, tasksDataSourceId, task_id);
 			return {
 				ok: true,
 				action: result.action,
@@ -1149,13 +1156,13 @@ function taskToChange(t: GistTask) {
 
 async function fetchNotionTaskIdsForBoard(boardSlug: string): Promise<Set<string>> {
 	const notionToken = process.env.NOTION_API_TOKEN;
-	const tasksDatabaseId = process.env.NOTION_TASKS_DATABASE_ID;
+	const tasksDataSourceId = process.env.TASKS_DATA_SOURCE_ID;
 
-	if (!notionToken || !tasksDatabaseId) {
+	if (!notionToken || !tasksDataSourceId) {
 		// If credentials are missing, skip tombstoning silently —
 		// the upsert path still works without Notion direct access.
 		console.warn(
-			"tombstone: NOTION_API_TOKEN or NOTION_TASKS_DATABASE_ID not configured — skipping tombstone pass"
+			"tombstone: NOTION_API_TOKEN or TASKS_DATABASE_ID not configured — skipping tombstone pass"
 		);
 		return new Set();
 	}
@@ -1163,7 +1170,7 @@ async function fetchNotionTaskIdsForBoard(boardSlug: string): Promise<Set<string
 	const notionHeaders = {
 		Authorization: `Bearer ${notionToken}`,
 		"Content-Type": "application/json",
-		"Notion-Version": "2022-06-28",
+		"Notion-Version": "2025-09-03",
 	};
 
 	const taskIds = new Set<string>();
@@ -1189,7 +1196,7 @@ async function fetchNotionTaskIdsForBoard(boardSlug: string): Promise<Set<string
 		if (startCursor) body.start_cursor = startCursor;
 
 		const res = await fetch(
-			`https://api.notion.com/v1/databases/${tasksDatabaseId}/query`,
+			`https://api.notion.com/v1/data_sources/${tasksDataSourceId}/query`,
 			{
 				method: "POST",
 				headers: notionHeaders,
@@ -1454,11 +1461,11 @@ function taskToNotionProperties(t: GistTask, projectPageId?: string | null) {
 /** Find Notion page ID by task_id in the tasks database. Returns null if not found. */
 async function findTaskPageId(
 	notion: any,
-	tasksDatabaseId: string,
+	tasksDataSourceId: string,
 	taskId: string,
 ): Promise<string | null> {
-	const response = await notion.databases.query({
-		database_id: tasksDatabaseId,
+	const response = await notion.dataSources.query({
+		data_source_id: tasksDataSourceId,
 		filter: {
 			property: "task_id",
 			rich_text: { equals: taskId },
@@ -1473,17 +1480,17 @@ async function findTaskPageId(
 
 /**
  * Resolve a discord_channel_id to a Notion page ID in the projects database.
- * Uses NOTION_PROJECTS_DATABASE_ID env var. Returns null if not found or not configured.
+ * Uses PROJECTS_DATABASE_ID env var. Returns null if not found or not configured.
  */
 async function resolveProjectPageId(
 	notion: any,
 	channelId: string,
 ): Promise<string | null> {
-	const projectsDatabaseId = process.env.NOTION_PROJECTS_DATABASE_ID;
-	if (!projectsDatabaseId) return null;
+	const projectsDataSourceId = process.env.PROJECTS_DATA_SOURCE_ID;
+	if (!projectsDataSourceId) return null;
 	try {
-		const response = await notion.databases.query({
-			database_id: projectsDatabaseId,
+		const response = await notion.dataSources.query({
+			data_source_id: projectsDataSourceId,
 			filter: {
 				property: "discord_channel_id",
 				rich_text: { equals: channelId },
@@ -1503,6 +1510,7 @@ async function resolveProjectPageId(
 async function upsertTaskViaNotion(
 	notion: any,
 	tasksDatabaseId: string,
+	tasksDataSourceId: string,
 	task: GistTask,
 ): Promise<{ action: "created" | "updated"; task_id: string }> {
 	// Resolve the project page ID for the parent_project relation
@@ -1515,7 +1523,7 @@ async function upsertTaskViaNotion(
 	const properties = taskToNotionProperties(task, projectPageId);
 	const existingPageId = await findTaskPageId(
 		notion,
-		tasksDatabaseId,
+		tasksDataSourceId,
 		task.task_id,
 	);
 
@@ -1537,12 +1545,12 @@ async function upsertTaskViaNotion(
 /** Tombstone a task: set status to "archived" if the page exists. */
 async function tombstoneTaskViaNotion(
 	notion: any,
-	tasksDatabaseId: string,
+	tasksDataSourceId: string,
 	taskId: string,
 ): Promise<{ action: "tombstoned" | "not_found"; task_id: string }> {
 	const existingPageId = await findTaskPageId(
 		notion,
-		tasksDatabaseId,
+		tasksDataSourceId,
 		taskId,
 	);
 
@@ -1550,17 +1558,13 @@ async function tombstoneTaskViaNotion(
 		return { action: "not_found", task_id: taskId };
 	}
 
+	// Use page archive (in_trash) rather than setting a `status` property —
+	// the tasks DB is `worker.database({type:"managed"})`, which rejects direct
+	// property writes from tools (`Cannot modify read-only property`). The
+	// page-level `archived` flag IS mutable and behaves as our tombstone.
 	await notion.pages.update({
 		page_id: existingPageId,
-		properties: {
-			status: { select: { name: "archived" } },
-			latest_summary: {
-				rich_text: [{ text: { content: "tombstoned: kanban gc" } }],
-			},
-			updated_at: {
-				date: { start: new Date().toISOString().slice(0, 10) },
-			},
-		},
+		archived: true,
 	});
 	return { action: "tombstoned", task_id: taskId };
 }
@@ -1572,9 +1576,10 @@ worker.webhook("kanbanEvent", {
 		"shell hook. Verifies HMAC signature, then writes directly to the Notion " +
 		"tasks database via context.notion. Provides <5s kanban→Notion latency.",
 	execute: async (events, { notion }) => {
-		const tasksDatabaseId = process.env.NOTION_TASKS_DATABASE_ID;
-		if (!tasksDatabaseId) {
-			throw new Error("NOTION_TASKS_DATABASE_ID not configured");
+		const tasksDatabaseId = process.env.TASKS_DATABASE_ID;
+		const tasksDataSourceId = process.env.TASKS_DATA_SOURCE_ID;
+		if (!tasksDatabaseId || !tasksDataSourceId) {
+			throw new Error("TASKS_DATABASE_ID / TASKS_DATA_SOURCE_ID not configured");
 		}
 
 		for (const event of events) {
@@ -1612,6 +1617,7 @@ worker.webhook("kanbanEvent", {
 					const result = await upsertTaskViaNotion(
 						notion,
 						tasksDatabaseId,
+						tasksDataSourceId,
 						payload.task_payload,
 					);
 					results.push(result);
@@ -1629,7 +1635,7 @@ worker.webhook("kanbanEvent", {
 					}
 					const result = await tombstoneTaskViaNotion(
 						notion,
-						tasksDatabaseId,
+						tasksDataSourceId,
 						payload.kanban_id,
 					);
 					results.push(result);
@@ -1651,8 +1657,9 @@ worker.webhook("kanbanEvent", {
 					}
 					for (const task of payload.tasks) {
 						const result = await upsertTaskViaNotion(
-							notion,
-							tasksDatabaseId,
+						notion,
+						tasksDatabaseId,
+						tasksDataSourceId,
 							task,
 						);
 						results.push(result);

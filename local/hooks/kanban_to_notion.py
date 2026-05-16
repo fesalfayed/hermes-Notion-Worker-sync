@@ -4,20 +4,32 @@ Shell hook: post_tool_call handler for kanban_* tools.
 
 Fires after every kanban tool call (kanban_complete, kanban_block,
 kanban_comment, kanban_create, kanban_heartbeat, kanban_link).
-Reads the hook JSON payload from stdin and triggers a debounced
-publish_gist() invocation (30s window) to push the kanban snapshot
-to GitHub gist — enabling ~1min Notion sync latency via tasksDelta.
 
-MUST exit within <1 sec — the hook runs inside the agent's tool loop.
+PRIMARY PATH (webhook):
+  Reads the affected task from the local kanban SQLite DB, builds a
+  webhook payload, signs it with HMAC-SHA256, and POSTs to the deployed
+  Notion Workers webhook endpoint. This gives <5s kanban→Notion latency.
+
+FALLBACK PATH (gist publish):
+  On webhook failure (5xx, timeout, network error), falls back to the
+  existing debounced gist-publish flow (30s window → 1min tasksDelta).
+  This ensures no events are lost even if the webhook endpoint is down.
+
+MUST exit within <5 sec — the hook runs inside the agent's tool loop.
 """
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import time
+import urllib.request
+import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -32,19 +44,28 @@ if not _kanban_sentinel.exists() and (_real_home / ".hermes" / "kanban").exists(
 REPO_DIR = _home / "hermes-projects-sync"
 STATE_DIR = REPO_DIR / "local" / "state"
 LOG_FILE = STATE_DIR / "kanban_to_notion_hook.log"
+ENV_FILE = REPO_DIR / ".env"
 
-# Debounce state file: stores epoch timestamp of when publish should fire
+# Debounce state file for fallback gist publish
 DEBOUNCE_FILE = STATE_DIR / "publish_gist_debounce.json"
-# Debounce window in seconds
 DEBOUNCE_WINDOW = 30
 
-# The gist publisher script
+# The gist publisher script (fallback path)
 PUBLISH_SCRIPT = _home / ".hermes" / "profiles" / "operator_dev" / "scripts" / "publish_kanban_gist.py"
+
+# Kanban DB path
+KANBAN_DB = _home / ".hermes" / "kanban" / "boards" / "hermes-projects-sync" / "kanban.db"
+
+# Board slug for this project
+BOARD_SLUG = "hermes-projects-sync"
 
 # Ensure state directory exists
 STATE_DIR.mkdir(parents=True, exist_ok=True)
 
-# Tool names that trigger a gist publish
+# Retry queue for webhook failures
+RETRY_QUEUE = STATE_DIR / "kanban_webhook_retry_queue.jsonl"
+
+# Tool names that trigger sync
 SYNC_TOOL_NAMES = {
     "kanban_complete",
     "kanban_block",
@@ -64,6 +85,206 @@ def log(msg: str) -> None:
     except Exception:
         pass
 
+
+def load_env() -> dict:
+    """Load .env file into a dict (simple KEY=VALUE parser)."""
+    env = {}
+    try:
+        with open(ENV_FILE) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                env[key.strip()] = value.strip()
+    except Exception:
+        pass
+    return env
+
+
+def get_webhook_url() -> Optional[str]:
+    """Read webhook URL from state file (set after first deploy)."""
+    url_file = STATE_DIR / "kanban_webhook_url.txt"
+    try:
+        if url_file.exists():
+            url = url_file.read_text().strip()
+            if url.startswith("https://"):
+                return url
+    except Exception:
+        pass
+    return None
+
+
+def get_webhook_secret() -> Optional[str]:
+    """Read KANBAN_WEBHOOK_SECRET from .env."""
+    env = load_env()
+    return env.get("KANBAN_WEBHOOK_SECRET") or os.environ.get("KANBAN_WEBHOOK_SECRET")
+
+
+def compute_hmac(secret: str, body: str) -> str:
+    """Compute HMAC-SHA256 signature for the webhook payload."""
+    mac = hmac.new(secret.encode(), body.encode(), hashlib.sha256)
+    return f"sha256={mac.hexdigest()}"
+
+
+def extract_task_id(data: dict) -> Optional[str]:
+    """Extract the task_id from the hook payload."""
+    # The hook payload contains tool_name and the tool's arguments/result.
+    # For kanban tools, the task_id is typically in the arguments or result.
+    args = data.get("arguments", {})
+    result = data.get("result", {})
+
+    # Direct task_id in args (kanban_show, kanban_complete, kanban_block, etc.)
+    task_id = args.get("task_id")
+    if task_id:
+        return task_id
+
+    # From environment variable (kanban_complete, kanban_block often use env default)
+    env_task = os.environ.get("HERMES_KANBAN_TASK")
+    if env_task:
+        return env_task
+
+    # From result (kanban_create returns the new task_id)
+    if isinstance(result, dict):
+        tid = result.get("task_id") or result.get("id")
+        if tid:
+            return tid
+
+    return None
+
+
+def read_task_from_db(task_id: str) -> Optional[dict]:
+    """Read a single task from the kanban SQLite DB."""
+    if not KANBAN_DB.exists():
+        return None
+
+    try:
+        conn = sqlite3.connect(str(KANBAN_DB), timeout=2)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        if not row:
+            conn.close()
+            return None
+
+        task = dict(row)
+
+        # Get parents
+        parents = [
+            r[0]
+            for r in conn.execute(
+                "SELECT parent_id FROM task_deps WHERE child_id = ?",
+                (task_id,),
+            ).fetchall()
+        ]
+
+        # Get children
+        children = [
+            r[0]
+            for r in conn.execute(
+                "SELECT child_id FROM task_deps WHERE parent_id = ?",
+                (task_id,),
+            ).fetchall()
+        ]
+
+        # Get latest run summary
+        latest_summary = None
+        try:
+            run_row = conn.execute(
+                "SELECT summary FROM task_runs WHERE task_id = ? AND summary IS NOT NULL "
+                "ORDER BY ended_at DESC LIMIT 1",
+                (task_id,),
+            ).fetchone()
+            if run_row:
+                latest_summary = run_row[0]
+        except Exception:
+            pass
+
+        conn.close()
+
+        # Build GistTask-compatible payload
+        created_at = datetime.fromtimestamp(
+            task["created_at"], tz=timezone.utc
+        ).isoformat()
+        # Use max of all timestamp fields for updated_at
+        ts_fields = [
+            task.get("created_at", 0),
+            task.get("started_at") or 0,
+            task.get("completed_at") or 0,
+            task.get("last_heartbeat_at") or 0,
+        ]
+        updated_at = datetime.fromtimestamp(
+            max(ts_fields), tz=timezone.utc
+        ).isoformat()
+
+        return {
+            "task_id": task["id"],
+            "board_slug": BOARD_SLUG,
+            "name": task.get("title", ""),
+            "status": task.get("status", "todo"),
+            "assignee": task.get("assignee"),
+            "body": task.get("body", "") or "",
+            "parents": parents,
+            "children": children,
+            "created_at": created_at,
+            "updated_at": updated_at,
+            "latest_summary": latest_summary,
+        }
+    except Exception as e:
+        log(f"read_task_from_db error: {e}")
+        return None
+
+
+def post_webhook(url: str, secret: str, payload: dict) -> tuple[bool, str]:
+    """
+    POST a signed JSON payload to the webhook URL.
+    Returns (success: bool, detail: str).
+    """
+    body = json.dumps(payload, separators=(",", ":"))
+    signature = compute_hmac(secret, body)
+
+    req = urllib.request.Request(
+        url,
+        data=body.encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "X-Kanban-Signature-256": signature,
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=4) as resp:
+            status = resp.status
+            if 200 <= status < 300:
+                return True, f"HTTP {status}"
+            else:
+                return False, f"HTTP {status}"
+    except urllib.error.HTTPError as e:
+        return False, f"HTTP {e.code}: {e.reason}"
+    except urllib.error.URLError as e:
+        return False, f"URLError: {e.reason}"
+    except Exception as e:
+        return False, f"Exception: {e}"
+
+
+def append_to_retry_queue(payload: dict, error: str) -> None:
+    """Append a failed webhook payload to the retry queue."""
+    entry = {
+        "payload": payload,
+        "error": error,
+        "retries": 0,
+        "queued_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        with open(RETRY_QUEUE, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception as e:
+        log(f"append_to_retry_queue error: {e}")
+
+
+# ── Fallback: debounced gist publish ─────────────────────────────────
 
 def read_debounce_state() -> dict:
     """Read debounce state: {fire_at: epoch, pending: int, pid: int|null}."""
@@ -95,31 +316,25 @@ def is_process_alive(pid: Optional[int]) -> bool:
 
 def schedule_publish(pending_count: int) -> None:
     """
-    Schedule a debounced gist publish.
-
-    Strategy: spawn a background process that sleeps for DEBOUNCE_WINDOW
-    seconds then runs the gist publisher. If a previous debounce process
-    is still sleeping, we just update the pending count (the existing
-    sleeper will pick up all coalesced changes).
+    Schedule a debounced gist publish (fallback path).
+    Spawn a background process that sleeps for DEBOUNCE_WINDOW seconds
+    then runs the gist publisher.
     """
     state = read_debounce_state()
 
-    # If there's already a live debounce process sleeping, just bump pending
     if is_process_alive(state.get("pid")):
         state["pending"] = state.get("pending", 0) + 1
         state["fire_at"] = time.time() + DEBOUNCE_WINDOW
         write_debounce_state(state)
-        log(f"kanban_to_notion: debounced publish_gist scheduled (window=30s, pending={state['pending']})")
+        log(f"fallback: debounced publish_gist scheduled (window=30s, pending={state['pending']})")
         return
 
-    # No live debounce process — spawn one
     new_state = {
         "fire_at": time.time() + DEBOUNCE_WINDOW,
         "pending": pending_count,
-        "pid": None,  # will be filled after Popen
+        "pid": None,
     }
 
-    # The debounce runner script: sleep, then exec the gist publisher
     runner_script = f"""
 import time, subprocess, json, sys, os
 from pathlib import Path
@@ -137,10 +352,8 @@ def log(msg):
     except Exception:
         pass
 
-# Sleep for the debounce window
 time.sleep({DEBOUNCE_WINDOW})
 
-# Read final pending count for logging
 pending = 0
 try:
     state = json.loads(debounce_file.read_text())
@@ -148,14 +361,12 @@ try:
 except Exception:
     pass
 
-# Clear debounce state
 try:
     debounce_file.write_text(json.dumps({{"fire_at": 0, "pending": 0, "pid": None}}))
 except Exception:
     pass
 
-# Run the gist publisher
-log(f"publish_gist firing (coalesced {{pending}} events)")
+log(f"fallback publish_gist firing (coalesced {{pending}} events)")
 try:
     env = os.environ.copy()
     env["HOME"] = "/home/user"
@@ -165,13 +376,13 @@ try:
         env=env,
     )
     if r.returncode == 0:
-        log(f"publish_gist completed OK (coalesced {{pending}} events)")
+        log(f"fallback publish_gist completed OK (coalesced {{pending}} events)")
     else:
-        log(f"publish_gist FAILED rc={{r.returncode}}: {{r.stderr[:300]}}")
+        log(f"fallback publish_gist FAILED rc={{r.returncode}}: {{r.stderr[:300]}}")
 except subprocess.TimeoutExpired:
-    log("publish_gist TIMEOUT (60s)")
+    log("fallback publish_gist TIMEOUT (60s)")
 except Exception as e:
-    log(f"publish_gist exception: {{e}}")
+    log(f"fallback publish_gist exception: {{e}}")
 """
 
     try:
@@ -179,19 +390,22 @@ except Exception as e:
             [sys.executable, "-c", runner_script],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            start_new_session=True,  # detach from parent process group
+            start_new_session=True,
         )
         new_state["pid"] = proc.pid
         write_debounce_state(new_state)
-        log(f"kanban_to_notion: debounced publish_gist scheduled (window=30s, pending={pending_count})")
+        log(f"fallback: debounced publish_gist scheduled (window=30s, pending={pending_count})")
     except Exception as e:
-        log(f"kanban_to_notion: failed to spawn debounce runner: {e}")
+        log(f"fallback: failed to spawn debounce runner: {e}")
 
+
+# ── Main ─────────────────────────────────────────────────────────────
 
 def main():
     """
-    Main entry point — read hook payload from stdin, trigger debounced publish.
-    Must complete in <1 sec.
+    Main entry point — read hook payload from stdin, try webhook first,
+    fall back to debounced gist publish on failure.
+    Must complete in <5 sec.
     """
     start = time.monotonic()
 
@@ -213,13 +427,56 @@ def main():
         print("{}")
         return
 
-    # Schedule debounced gist publish
+    # Extract the affected task_id
+    task_id = extract_task_id(data)
+    if not task_id:
+        log(f"hook: could not extract task_id from {tool_name}, falling back to gist publish")
+        schedule_publish(pending_count=1)
+        elapsed = time.monotonic() - start
+        log(f"hook processed {tool_name} (no task_id, gist fallback) in {elapsed:.3f}s")
+        print("{}")
+        return
+
+    # Try webhook path first
+    webhook_url = get_webhook_url()
+    webhook_secret = get_webhook_secret()
+
+    if webhook_url and webhook_secret:
+        # Read full task data from kanban DB
+        task_data = read_task_from_db(task_id)
+        if task_data:
+            payload = {
+                "event_type": "upsert",
+                "kanban_id": task_id,
+                "board_slug": BOARD_SLUG,
+                "task_payload": task_data,
+            }
+
+            success, detail = post_webhook(webhook_url, webhook_secret, payload)
+
+            if success:
+                log(f"webhook: upsert {task_id} via {tool_name} -> {detail}")
+                elapsed = time.monotonic() - start
+                log(f"hook processed {tool_name} for {task_id} in {elapsed:.3f}s (webhook)")
+                print("{}")
+                return
+            else:
+                # Webhook failed — append to retry queue and fall through to gist
+                log(f"webhook: FAILED upsert {task_id} -> {detail}, falling back to gist")
+                append_to_retry_queue(payload, detail)
+        else:
+            log(f"webhook: could not read task {task_id} from DB, falling back to gist")
+    else:
+        if not webhook_url:
+            log(f"webhook: no URL configured, using gist fallback for {task_id}")
+        elif not webhook_secret:
+            log(f"webhook: no secret configured, using gist fallback for {task_id}")
+
+    # Fallback: debounced gist publish
     schedule_publish(pending_count=1)
 
     elapsed = time.monotonic() - start
-    log(f"hook processed {tool_name} in {elapsed:.3f}s")
-
-    # Return empty JSON (no blocking action)
+    log(f"hook processed {tool_name} for {task_id} in {elapsed:.3f}s (gist fallback)")
     print("{}")
 
 

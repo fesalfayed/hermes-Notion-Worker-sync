@@ -3,7 +3,7 @@
 	"version": "0.0.0",
 	"private": true,
 	"scripts": {
-		"build": "tsc",
+		"build": "tsc && node -e \"require('fs').copyFileSync('board_channel_map.yaml','dist/board_channel_map.yaml')\"",
 		"check": "tsc --noEmit"
 	},
 	"engines": {

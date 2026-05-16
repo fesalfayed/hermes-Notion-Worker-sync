@@ -8,7 +8,7 @@ A Notion Worker that mirrors the AGENTIC-OS Discord guild into two managed Notio
 databases (`Hermes Projects`, `Hermes Tasks`), plus a local cron pipeline that
 publishes the kanban board as a private GitHub Gist for the tasks syncs to consume.
 
-**Status:** Phase 1 ✅ closed · Phase 2 ✅ closed · Phase 3 ✅ closed
+**Status:** Phase 1 ✅ closed · Phase 2 ✅ closed · Phase 3 ✅ closed · Phase 4 ✅ closed
 **Worker ID:** `019e2a23-71c0-70e4-b04e-0e15659ba93a` (workspace `e013cb0d-…`)
 
 ---
@@ -29,7 +29,7 @@ publishes the kanban board as a private GitHub Gist for the tasks syncs to consu
 - [Schema reference](#schema-reference)
 - [Verification & testing](#verification--testing)
 - [Troubleshooting](#troubleshooting)
-- [Roadmap (Phase 3)](#roadmap-phase-3)
+- [Roadmap (Phase 5)](#roadmap-phase-5)
 - [Project history](#project-history)
 - [Documentation index](#documentation-index)
 
@@ -209,8 +209,8 @@ and worker record. Committed to source — it has no secrets.
 |---|---|---|---|
 | `NOTION_API_TOKEN` | ✅ | all syncs/tools that hit Notion | Internal integration token |
 | `DISCORD_BOT_TOKEN` | ✅ | `projectsFromDiscord` + 4 tools | Discord REST auth |
-| `NOTION_PROJECTS_DATABASE_ID` | ✅ | `rebindByChannelId`, `bindProjectToBoard` | Projects data-source ID |
-| `NOTION_TASKS_DATABASE_ID` | ✅ | `bindProjectToBoard` | Tasks data-source ID |
+| `PROJECTS_DATABASE_ID` | ✅ | `rebindByChannelId`, `bindProjectToBoard` | Projects data-source ID |
+| `TASKS_DATABASE_ID` | ✅ | `bindProjectToBoard` | Tasks data-source ID |
 | `KANBAN_GIST_URL` | ✅ | `tasksBackfill`, `tasksDelta` | Raw URL of kanban snapshot gist |
 | `GITHUB_TOKEN` | ✅ | `tasksBackfill`, `tasksDelta`, gist publisher | Gist read/write |
 | `NOTION_WORKSPACE_ID` | optional | CLI | Skips workspace selection prompt |
@@ -374,25 +374,27 @@ Re-run any phase's evidence with `bash verification/<card>/run.sh` where present
 
 ---
 
-## Roadmap (Phase 4+)
+## Roadmap (Phase 5)
 
-### Phase 3 ✅ shipped (2026-05-16)
-- ✅ Canonical relation `project` ↔ `kanban_tasks` — duplicates archived.
-- ✅ Event-driven gist trigger — debounced 30s window, **latency 16min → ~1.5min** (`local/hooks/kanban_to_notion.py`).
-- ✅ Multi-board registry — `board_channel_map.yaml` + `--seed` CLI (unblocks notion-pmo, imsg-triage).
-- Full closeout: [`docs/PHASE_3_CLOSEOUT.md`](docs/PHASE_3_CLOSEOUT.md).
+### Phase 4 ✅ shipped (2026-05-16)
+- ✅ **Custom Agent layer** — 7 tools attached as Notion Custom Agent; Notion AI rename round-trip verified end-to-end.
+- ✅ **Webhook-driven push** — `worker.webhook(kanbanEvent)` replaces 15m gist + 1m delta. **Latency ~1.5min → <10s** (HMAC via `x-kanban-signature-256`).
+- ✅ **Tombstone in delta cycle** — `tasksDelta` now emits tombstones on row vanish; tool path uses `pages.update({archived:true})`.
+- ✅ **Drift watchdog → row-level diffs** — 4-category differ (`local/state/drift_latest.json`) + daily 09:00 digest to `#daily-updates`, silent-on-zero.
+- ✅ **Notion API migrated to 2025-09-03** — `dataSources.query` replaces `databases.query`; `NOTION_*` env prefix retired (reserved server-side).
+- Full closeout: [`docs/PHASE_4_CLOSEOUT.md`](docs/PHASE_4_CLOSEOUT.md).
 
-### Phase 4 candidates (not yet committed)
+### Phase 5 candidates (not yet committed)
 
 #### Tier B — capability
-- Tombstone emission to `tasksDelta` so kanban deletes propagate without a full backfill.
-- Wire remaining `notion-pmo` DBs: Areas (`20f2e89c-…`), Sprints (`f76ea8ab-…`).
 - Notion → kanban write-back via `sync_dirty` checkbox, with conflict arbitration (kanban wins on status, Notion on description/due).
+- Wire remaining `notion-pmo` DBs: Areas (`20f2e89c-…`), Sprints (`f76ea8ab-…`).
+- Reap paused `kanban-gist-publisher` cron after 7-day clean window (id `12ada971a84c`).
 
 #### Tier C — architectural
-- Webhook-driven sync — replace gist + delta with event push. Latency → seconds.
-- Notion Custom Agent wiring for the 5 tools ("rename project X to Y" via Notion AI).
-- Drift watchdog → row-level diffs into a digest channel instead of count summaries.
+- Multi-tenant Custom Agent (one agent per kanban board, scoped by `board_slug`).
+- Pre-merge dry-run mode for tool capabilities (preview diff before commit).
+- Optional Notion-side audit log for every webhook-driven write.
 
 ---
 
@@ -403,6 +405,7 @@ Re-run any phase's evidence with `bash verification/<card>/run.sh` where present
 | 1 | Projects sync (Discord ↔ Notion managed DB, 4 tools) | ✅ Closed (2026-05-15) | Discord `000000000000000018` |
 | 2 | Tasks sync via gist pipeline (backfill + delta) + drift watchdog | ✅ Closed (2026-05-15) | Discord `000000000000000019` |
 | 3 | Cleanup + multi-board generalization (latency 16min → 1.5min) | ✅ Closed (2026-05-16) | See `docs/PHASE_3_CLOSEOUT.md` |
+| 4 | Custom Agent + webhook push + drift digest (latency 1.5min → <10s) | ✅ Closed (2026-05-16) | See `docs/PHASE_4_CLOSEOUT.md` |
 
 Full closeout snapshot: [`docs/CHECKPOINT.md`](docs/CHECKPOINT.md).
 
@@ -414,6 +417,7 @@ Full closeout snapshot: [`docs/CHECKPOINT.md`](docs/CHECKPOINT.md).
 - [`AGENTS.md`](AGENTS.md) / [`CLAUDE.md`](CLAUDE.md) — Notion Workers SDK reference + contribution guide for AI agents
 - [`docs/CHECKPOINT.md`](docs/CHECKPOINT.md) — End-of-Phase-2 architectural snapshot
 - [`docs/PHASE_3_CLOSEOUT.md`](docs/PHASE_3_CLOSEOUT.md) — Phase-3 closeout: latency win, multi-board registry, relation cleanup
+- [`docs/PHASE_4_CLOSEOUT.md`](docs/PHASE_4_CLOSEOUT.md) — Phase-4 closeout: Custom Agent (7 tools), webhook-driven push (<10s end-to-end), row-level drift digest
 - [`board_channel_map.yaml`](board_channel_map.yaml) — Active kanban↔channel bindings
 - `verification/` — Per-card test evidence
 
