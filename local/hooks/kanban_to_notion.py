@@ -174,7 +174,7 @@ def read_task_from_db(task_id: str) -> Optional[dict]:
         parents = [
             r[0]
             for r in conn.execute(
-                "SELECT parent_id FROM task_deps WHERE child_id = ?",
+                "SELECT parent_id FROM task_links WHERE child_id = ?",
                 (task_id,),
             ).fetchall()
         ]
@@ -183,7 +183,7 @@ def read_task_from_db(task_id: str) -> Optional[dict]:
         children = [
             r[0]
             for r in conn.execute(
-                "SELECT child_id FROM task_deps WHERE parent_id = ?",
+                "SELECT child_id FROM task_links WHERE parent_id = ?",
                 (task_id,),
             ).fetchall()
         ]
@@ -378,7 +378,7 @@ try:
     if r.returncode == 0:
         log(f"fallback publish_gist completed OK (coalesced {{pending}} events)")
     else:
-        log(f"fallback publish_gist FAILED rc={{r.returncode}}: {{r.stderr[:300]}}")
+        log(f"fallback publish_gist FAILED rc={{r.returncode}}: stderr={{r.stderr[:2000]}} stdout={{r.stdout[:500]}}")
 except subprocess.TimeoutExpired:
     log("fallback publish_gist TIMEOUT (60s)")
 except Exception as e:

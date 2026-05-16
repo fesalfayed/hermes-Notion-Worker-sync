@@ -22,8 +22,11 @@ from pathlib import Path
 
 # ── Configuration ──────────────────────────────────────────────────────
 BOARD_SLUG = "hermes-projects-sync"
-DB_PATH = Path.home() / ".hermes" / "kanban" / "boards" / BOARD_SLUG / "kanban.db"
-STATE_DIR = Path.home() / ".hermes" / "profiles" / "orchestrator" / "cron" / "state"
+# Resolve against literal real HOME — Path.home() returns the agent-sandbox
+# HOME under ~/.hermes/profiles/*/home/, which doesn't contain the kanban DB.
+REAL_HOME = Path(os.environ.get("REAL_HOME", "/Users/fesal"))
+DB_PATH = REAL_HOME / ".hermes" / "kanban" / "boards" / BOARD_SLUG / "kanban.db"
+STATE_DIR = REAL_HOME / ".hermes" / "profiles" / "orchestrator" / "cron" / "state"
 STATE_FILE = STATE_DIR / "kanban_gist_id.txt"
 GIST_FILENAME = "kanban_snapshot.json"
 GIST_DESC = "hermes-projects-sync kanban snapshot"
