@@ -189,6 +189,11 @@ export async function buildTombstoneChanges(
 				type: "upsert" as const,
 				key: notionTaskId,
 				properties: {
+					// IMPORTANT: include task_id so the managed-DB primaryKey lookup
+					// can match this upsert to the existing row. Without it the
+					// Workers SDK has no way to bind `key` to the row and the
+					// change is silently dropped (or worse, creates a duplicate).
+					task_id: Builder.richText(notionTaskId),
 					status: Builder.select("archived"),
 					latest_summary: Builder.richText("tombstoned: absent from kanban snapshot"),
 					updated_at: Builder.date(today),
