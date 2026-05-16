@@ -79,7 +79,7 @@ ntn workers exec tasksBackfill
 
 ## Discovering bindings
 
-`scripts/seed-board-map.ts` can scaffold the YAML by enumerating channels in a guild. It reads `AGENTIC_GUILD_ID` and `DISCORD_BOT_TOKEN` and writes YAML to stdout. Review before committing.
+`scripts/seed-board-map.ts` can scaffold the YAML by enumerating channels in a guild. It reads `DISCORD_GUILD_ID` and `DISCORD_BOT_TOKEN` and writes YAML to stdout. Review before committing.
 
 ```bash
 npx tsx scripts/seed-board-map.ts > board_channel_map.yaml.new

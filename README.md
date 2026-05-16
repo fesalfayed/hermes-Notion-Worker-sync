@@ -70,7 +70,8 @@ Full diagram and rationale (why the gist hop, why webhook + delta both, how tomb
 - `DISCORD_BOT_TOKEN` — required for `projectsFromDiscord` and the channel-management tools (`renameProjectChannel`, `archiveProject`, `unarchiveProject`, `rebindByChannelId`).
 - `GITHUB_TOKEN` (or `GIST_TOKEN`) + `KANBAN_TASKS_GIST_ID` — required for `tasksDelta` and `tasksBackfill`.
 - `KANBAN_WEBHOOK_SECRET` — required for `kanbanEvent` HMAC verification.
-- `AGENTIC_GUILD_ID` — your Discord guild ID (replaces the hardcoded default in `scripts/seed-board-map.ts`).
+- `DISCORD_GUILD_ID` — your Discord guild ID.
+- `DISCORD_PROJECTS_CATEGORY_ID` / `DISCORD_ARCHIVE_CATEGORY_ID` — Discord channel category IDs for project and archive channels.
 
 Full table with provenance and scope: [docs/configuration/env.md](docs/configuration/env.md).
 
@@ -88,7 +89,7 @@ hermes-projects-sync/
 │   ├── lib/                 # hmac, notionHelpers
 │   └── boardChannelMap.ts   # YAML config loader
 ├── scripts/                 # onboard.sh, seed-board-map.ts
-├── docs/                    # architecture, capabilities, configuration, history
+├── docs/                    # architecture, capabilities, configuration
 ├── .github/                 # CI + issue/PR templates
 ├── board_channel_map.yaml   # kanban-board ↔ Discord-channel registry
 ├── package.json
@@ -108,7 +109,6 @@ hermes-projects-sync/
 - [Development](docs/development.md)
 - [Deployment](docs/deployment.md)
 - [Changelog](CHANGELOG.md)
-- [Internal phase retrospectives](docs/history/) — historical context
 
 Upstream Notion docs: <https://developers.notion.com/>.
 

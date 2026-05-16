@@ -27,7 +27,7 @@ The project follows a per-capability module pattern (`src/syncs/`, `src/tools/`,
 To regenerate the canonical board↔channel map from your Discord guild:
 
 ```bash
-export AGENTIC_GUILD_ID=<your-guild-id>
+export DISCORD_GUILD_ID=<your-guild-id>
 npx tsx scripts/seed-board-map.ts
 ```
 
