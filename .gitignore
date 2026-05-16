@@ -11,3 +11,4 @@ _archive/
 local/state/
 local/test_hook_payload.json
 __pycache__/
+graphify-out/

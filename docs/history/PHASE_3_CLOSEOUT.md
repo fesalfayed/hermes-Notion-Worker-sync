@@ -1,3 +1,5 @@
+> **Historical:** This document captures an internal project phase. It is preserved for context but does not reflect current behavior. See [README](../../README.md) and [CHANGELOG](../../CHANGELOG.md) for current state.
+
 # Phase 3 Closeout — 2026-05-16
 
 > Cleanup + multi-board generalization. Three cards, all green.

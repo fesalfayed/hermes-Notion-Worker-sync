@@ -4,7 +4,8 @@
 	"private": true,
 	"scripts": {
 		"build": "tsc && node -e \"require('fs').copyFileSync('board_channel_map.yaml','dist/board_channel_map.yaml')\"",
-		"check": "tsc --noEmit"
+		"check": "tsc --noEmit",
+		"onboard": "bash scripts/onboard.sh"
 	},
 	"engines": {
 		"node": ">=22.0.0",
