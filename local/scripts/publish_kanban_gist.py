@@ -32,8 +32,8 @@ GIST_DESC = "hermes-projects-sync kanban snapshot"
 GH_ENV = {**os.environ, "HOME": "/Users/fesal"}
 
 # ── Status mapping ─────────────────────────────────────────────────────
-# Kanban DB statuses → upsertTask schema enum values
-# upsertTask expects: todo, running, blocked, done, cancelled, archived
+# Kanban DB statuses → tasksDelta schema enum values
+# tasksDelta expects: todo, running, blocked, done, cancelled, archived
 STATUS_MAP = {
     "todo": "todo",
     "ready": "todo",       # ready is a kanban-internal pre-todo state
@@ -82,13 +82,13 @@ def read_kanban_db():
 
     conn.close()
 
-    # Build task objects matching upsertTask schema
+    # Build task objects matching tasksDelta schema
     tasks = []
     for row in tasks_rows:
         task_id = row["id"]
         status = STATUS_MAP.get(row["status"], row["status"])
 
-        # Timestamps: kanban stores epoch integers, upsertTask expects ISO 8601
+        # Timestamps: kanban stores epoch integers, tasksDelta expects ISO 8601
         created_at = (
             datetime.fromtimestamp(row["created_at"], tz=timezone.utc).isoformat()
             if row["created_at"]
