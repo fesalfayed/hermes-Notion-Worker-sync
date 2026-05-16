@@ -26,8 +26,8 @@ import { homedir } from "os";
 // ── Parse args ─────���────────────────────────────────────────────────
 const args = process.argv.slice(2);
 let boardsDir = join(homedir(), ".hermes", "kanban", "boards");
-// REPLACE ME: set AGENTIC_GUILD_ID env var or pass --guild <id>
-let guildId = process.env.AGENTIC_GUILD_ID ?? "<your-guild-id>";
+// REPLACE ME: set DISCORD_GUILD_ID env var or pass --guild <id>
+let guildId = process.env.DISCORD_GUILD_ID ?? "<your-guild-id>";
 
 for (let i = 0; i < args.length; i++) {
 	if (args[i] === "--boards-dir" && args[i + 1]) {

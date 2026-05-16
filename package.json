@@ -1,7 +1,14 @@
 {
-	"name": "@notionhq/workers-template",
-	"version": "0.0.0",
+	"name": "hermes-projects-sync",
+	"version": "1.0.0",
+	"description": "Bidirectional Discord ↔ Notion sync built on @notionhq/workers — mirrors Discord channels into Notion databases",
 	"private": true,
+	"keywords": ["notion", "discord", "sync", "kanban", "workers"],
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/fesalfayed/hermes-projects-sync.git"
+	},
 	"scripts": {
 		"build": "tsc && node -e \"require('fs').copyFileSync('board_channel_map.yaml','dist/board_channel_map.yaml')\"",
 		"check": "tsc --noEmit",

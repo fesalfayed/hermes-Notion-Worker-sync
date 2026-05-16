@@ -1,6 +1,0 @@
-{
-  "worker_id": "019e2a23-71c0-70e4-b04e-0e15659ba93a",
-  "workspace_id": "e013cb0d-6d7f-448f-bae1-cca862c5c35c",
-  "database_key": "projects",
-  "note": "Managed database 'projects' declared and deployed. The database will be materialized in Notion when the first sync capability writes to it. ntn workers databases list does not exist as a CLI command; this info is captured from the deploy run logs (fetchAndSaveCapabilities)."
-}

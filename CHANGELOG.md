@@ -20,7 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Refactored `src/index.ts` (1,681 LOC monolith) into 19 per-capability modules** under `src/syncs/`, `src/tools/`, `src/webhooks/`, `src/lib/`. Behavior unchanged; capability keys preserved.
 - Full README rewrite for public OSS release
 - `.env.example` cleaned: one variable per line, no placeholder concatenations
-- `scripts/seed-board-map.ts` no longer hardcodes a guild ID — reads `AGENTIC_GUILD_ID` env var
+- `scripts/seed-board-map.ts` no longer hardcodes a guild ID — reads `DISCORD_GUILD_ID` env var
 - Internal phase retrospectives moved to `docs/history/`
 
 ### Fixed
