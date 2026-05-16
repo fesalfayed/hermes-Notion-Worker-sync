@@ -1,7 +1,8 @@
-import { Worker } from "@notionhq/workers";
+import { Worker, WebhookVerificationError } from "@notionhq/workers";
 import * as Schema from "@notionhq/workers/schema";
 import * as Builder from "@notionhq/workers/builder";
 import { j } from "@notionhq/workers/schema-builder";
+import * as crypto from "node:crypto";
 import { loadBoardChannelMap, loadRawConfig, validateBoardChannelMap } from "./boardChannelMap.js";
 
 const worker = new Worker();
@@ -235,9 +236,9 @@ worker.sync("projectsFromDiscord", {
 // Tool: renameProjectChannel
 // Renames a Discord channel. Propagates a name change from Notion → Discord.
 worker.tool("renameProjectChannel", {
-	title: "Rename Project Channel",
+	title: "Rename a project's Discord channel",
 	description:
-		"Rename a Discord channel. Fired when a user renames the project in Notion. Propagates the change to Discord.",
+		"Rename a project's Discord channel. Use when someone says 'rename project X to Y' — this changes the Discord channel name to match.",
 	schema: j.object({
 		discord_channel_id: j
 			.string()
@@ -330,8 +331,8 @@ worker.tool("renameProjectChannel", {
 // Tool: archiveProject
 // Moves a Discord channel from PROJECTS category to ARCHIVE category.
 worker.tool("archiveProject", {
-	title: "Archive Project",
-	description: "Move a Discord channel to the ARCHIVE category",
+	title: "Archive a project",
+	description: "Archive a project by moving its Discord channel to the ARCHIVE category. Use when someone says 'archive project X' — the channel moves out of active projects.",
 	schema: j.object({
 		discord_channel_id: j.string().describe("The Discord channel ID to archive"),
 	}),
@@ -428,8 +429,8 @@ worker.tool("archiveProject", {
 // Tool: unarchiveProject
 // Moves a Discord channel from ARCHIVE category to PROJECTS category.
 worker.tool("unarchiveProject", {
-	title: "Unarchive Project",
-	description: "Move a Discord channel from ARCHIVE back to PROJECTS category",
+	title: "Unarchive a project",
+	description: "Bring a project back from the archive by moving its Discord channel back to the active PROJECTS category. Use when someone says 'unarchive project X'.",
 	schema: j.object({
 		discord_channel_id: j.string().describe("The Discord channel ID to unarchive"),
 	}),
@@ -528,9 +529,9 @@ worker.tool("unarchiveProject", {
 // Re-anchors a Notion row to its Discord channel by discord_channel_id.
 // Detects when a Discord channel was renamed (slug drift) and syncs current channel state.
 worker.tool("rebindByChannelId", {
-	title: "Rebind Project by Discord Channel ID",
+	title: "Rebind a project to its Discord channel",
 	description:
-		"Re-anchor a Notion project row to its Discord channel using discord_channel_id (the stable key). Syncs channel name, topic, and category to Notion. Use for emergency rebind when the sync is paused or drift occurred via direct Notion edits.",
+		"Re-sync a project's Notion row with its Discord channel. Use when a project row drifted or was edited directly in Notion and needs to match Discord again. Fetches the latest channel name, topic, and category from Discord and patches the Notion row.",
 	schema: j.object({
 		discord_channel_id: j.string().describe("The Discord channel snowflake to rebind"),
 	}),
@@ -758,11 +759,10 @@ worker.tool("rebindByChannelId", {
 // One-shot: populates kanban_board_slug on the project row and re-links
 // every task row in the board to the project via the `project` relation.
 worker.tool("bindProjectToBoard", {
-	title: "Bind Project to Kanban Board",
+	title: "Bind a project to a kanban board",
 	description:
-		"Populate kanban_board_slug on a project row and auto-relate all tasks " +
-		"in that board to the project. Use after initial board creation or when " +
-		"the binding drifts. Overwrites existing project relations on task rows.",
+		"Connect a project to a kanban board so tasks show up under it. Use when someone says 'bind board X to channel Y' — " +
+		"this sets the kanban_board_slug on the project and links all existing tasks in that board to the project.",
 	schema: j.object({
 		discord_channel_id: j
 			.string()
@@ -947,6 +947,125 @@ worker.tool("bindProjectToBoard", {
 });
 
 
+// Tool: upsertTask
+// Manual override: create or update a single task row in the Notion tasks DB,
+// bypassing the gist→sync pipeline. Uses context.notion (pre-authenticated
+// when invoked via Custom Agent).
+worker.tool("upsertTask", {
+	title: "Create or update a task",
+	description:
+		"Manually create or update a task in the Notion tasks database. Use when someone says " +
+		"'add task X' or 'update task Y's status to Z'. This writes directly to Notion, " +
+		"bypassing the normal gist sync — handy for one-off corrections or urgent updates.",
+	schema: j.object({
+		task_id: j.string().describe("The kanban task ID (e.g. 't_abcd1234'). Used as the primary key."),
+		name: j.string().describe("Task title / name."),
+		board_slug: j.string().describe("The kanban board slug (e.g. 'hermes-projects-sync')."),
+		status: j
+			.enum("todo", "running", "blocked", "done", "cancelled", "archived")
+			.describe("Task status."),
+		assignee: j.string().nullable().describe("Profile name of the assignee, or null."),
+		body: j.string().nullable().describe("Task body / description (truncated to 2000 chars). Null to leave empty."),
+		parents: j.string().nullable().describe("Comma-separated parent task IDs, or null."),
+		children: j.string().nullable().describe("Comma-separated child task IDs, or null."),
+		latest_summary: j.string().nullable().describe("Most recent run summary, or null."),
+	}),
+	outputSchema: j.object({
+		ok: j.boolean(),
+		action: j.string().nullable(),
+		task_id: j.string().nullable(),
+		error: j.string().nullable(),
+	}),
+	hints: { readOnlyHint: false },
+	execute: async (input, { notion }) => {
+		const tasksDatabaseId = process.env.NOTION_TASKS_DATABASE_ID;
+
+		if (!tasksDatabaseId) {
+			return { ok: false, action: null, task_id: null, error: "NOTION_TASKS_DATABASE_ID not configured" };
+		}
+
+		try {
+			const now = new Date().toISOString();
+			const gistTask: GistTask = {
+				task_id: input.task_id,
+				name: input.name,
+				board_slug: input.board_slug,
+				status: input.status,
+				assignee: input.assignee ?? null,
+				body: input.body ?? "",
+				parents: input.parents ? input.parents.split(",").map((s: string) => s.trim()).filter(Boolean) : [],
+				children: input.children ? input.children.split(",").map((s: string) => s.trim()).filter(Boolean) : [],
+				created_at: now,
+				updated_at: now,
+				latest_summary: input.latest_summary ?? null,
+			};
+
+			const result = await upsertTaskViaNotion(notion, tasksDatabaseId, gistTask);
+			return {
+				ok: true,
+				action: result.action,
+				task_id: result.task_id,
+				error: null,
+			};
+		} catch (err) {
+			return {
+				ok: false,
+				action: null,
+				task_id: input.task_id,
+				error: `Exception: ${err instanceof Error ? err.message : String(err)}`,
+			};
+		}
+	},
+});
+
+
+// Tool: tombstoneTask
+// Manual override: mark a task as archived in the Notion tasks DB,
+// bypassing the gist→sync pipeline. Uses context.notion (pre-authenticated
+// when invoked via Custom Agent).
+worker.tool("tombstoneTask", {
+	title: "Archive (tombstone) a task",
+	description:
+		"Mark a task as archived in the Notion tasks database. Use when someone says " +
+		"'remove task X' or 'tombstone task Y'. This sets the task's status to 'archived' " +
+		"directly in Notion, bypassing the normal gist sync.",
+	schema: j.object({
+		task_id: j.string().describe("The kanban task ID to tombstone (e.g. 't_abcd1234')."),
+	}),
+	outputSchema: j.object({
+		ok: j.boolean(),
+		action: j.string().nullable(),
+		task_id: j.string().nullable(),
+		error: j.string().nullable(),
+	}),
+	hints: { readOnlyHint: false },
+	execute: async ({ task_id }, { notion }) => {
+		const tasksDatabaseId = process.env.NOTION_TASKS_DATABASE_ID;
+
+		if (!tasksDatabaseId) {
+			return { ok: false, action: null, task_id: null, error: "NOTION_TASKS_DATABASE_ID not configured" };
+		}
+
+		try {
+			const result = await tombstoneTaskViaNotion(notion, tasksDatabaseId, task_id);
+			return {
+				ok: true,
+				action: result.action,
+				task_id: result.task_id,
+				error: null,
+			};
+		} catch (err) {
+			return {
+				ok: false,
+				action: null,
+				task_id: task_id,
+				error: `Exception: ${err instanceof Error ? err.message : String(err)}`,
+			};
+		}
+	},
+});
+
+
 // ── Helpers for gist-backed task syncs ──────────────────────────────
 type GistTask = {
 	task_id: string;
@@ -1022,6 +1141,135 @@ function taskToChange(t: GistTask) {
 	};
 }
 
+// ── Tombstone helpers ────────────────────────────────────────────────
+// Query the Notion tasks database for all non-archived rows belonging to
+// a specific board_slug. Returns a set of task_id strings.
+// Used by tasksDelta to detect orphaned Notion rows that no longer exist
+// in the kanban snapshot and should be tombstoned.
+
+async function fetchNotionTaskIdsForBoard(boardSlug: string): Promise<Set<string>> {
+	const notionToken = process.env.NOTION_API_TOKEN;
+	const tasksDatabaseId = process.env.NOTION_TASKS_DATABASE_ID;
+
+	if (!notionToken || !tasksDatabaseId) {
+		// If credentials are missing, skip tombstoning silently —
+		// the upsert path still works without Notion direct access.
+		console.warn(
+			"tombstone: NOTION_API_TOKEN or NOTION_TASKS_DATABASE_ID not configured — skipping tombstone pass"
+		);
+		return new Set();
+	}
+
+	const notionHeaders = {
+		Authorization: `Bearer ${notionToken}`,
+		"Content-Type": "application/json",
+		"Notion-Version": "2022-06-28",
+	};
+
+	const taskIds = new Set<string>();
+	let hasMore = true;
+	let startCursor: string | undefined;
+
+	while (hasMore) {
+		const body: any = {
+			filter: {
+				and: [
+					{
+						property: "board_slug",
+						rich_text: { equals: boardSlug },
+					},
+					{
+						property: "status",
+						select: { does_not_equal: "archived" },
+					},
+				],
+			},
+			page_size: 100,
+		};
+		if (startCursor) body.start_cursor = startCursor;
+
+		const res = await fetch(
+			`https://api.notion.com/v1/databases/${tasksDatabaseId}/query`,
+			{
+				method: "POST",
+				headers: notionHeaders,
+				body: JSON.stringify(body),
+			}
+		);
+
+		if (!res.ok) {
+			console.warn(
+				`tombstone: Notion query failed (${res.status}) — skipping tombstone pass`
+			);
+			return new Set();
+		}
+
+		const data = (await res.json()) as any;
+		for (const page of data.results ?? []) {
+			const props = page.properties;
+			const tid =
+				props?.task_id?.type === "rich_text"
+					? props.task_id.rich_text[0]?.plain_text
+					: undefined;
+			if (tid) taskIds.add(tid);
+		}
+
+		hasMore = data.has_more ?? false;
+		startCursor = data.next_cursor ?? undefined;
+	}
+
+	return taskIds;
+}
+
+/**
+ * Build tombstone changes for Notion rows that exist in the tasks DB but
+ * are absent from the kanban gist snapshot.
+ *
+ * Guarantees:
+ *   - Multi-board safety: only queries Notion for the snapshot's board_slug.
+ *   - Idempotency: only considers non-archived rows, so re-running after
+ *     a tombstone cycle is a no-op (no status flap, no write churn).
+ *   - Defensive: if Notion query fails, returns [] (no false tombstones).
+ */
+async function buildTombstoneChanges(
+	snapshot: GistSnapshot
+): Promise<Array<{ type: "upsert"; key: string; properties: any }>> {
+	const snapshotTaskIds = new Set(snapshot.tasks.map((t) => t.task_id));
+	const notionTaskIds = await fetchNotionTaskIdsForBoard(snapshot.board);
+
+	if (notionTaskIds.size === 0) {
+		// Either no rows in Notion yet, or the query failed/was skipped.
+		return [];
+	}
+
+	const tombstones: Array<{ type: "upsert"; key: string; properties: any }> = [];
+	const today = new Date().toISOString().slice(0, 10);
+
+	for (const notionTaskId of notionTaskIds) {
+		if (!snapshotTaskIds.has(notionTaskId)) {
+			// This task exists in Notion (non-archived) but is absent from the
+			// kanban snapshot → tombstone it.
+			tombstones.push({
+				type: "upsert" as const,
+				key: notionTaskId,
+				properties: {
+					status: Builder.select("archived"),
+					latest_summary: Builder.richText("tombstoned: absent from kanban snapshot"),
+					updated_at: Builder.date(today),
+				},
+			});
+		}
+	}
+
+	if (tombstones.length > 0) {
+		console.log(
+			`tombstone: ${tombstones.length} task(s) absent from snapshot — marking archived: ${tombstones.map((t) => t.key).join(", ")}`
+		);
+	}
+
+	return tombstones;
+}
+
 // ── Sync: tasksBackfill ──────────────────────────────────────────────
 // Replace-mode, manual trigger. Drains the full gist snapshot into the
 // tasks DB. Run manually to recover from drift, backfill new properties,
@@ -1045,8 +1293,18 @@ worker.sync("tasksBackfill", {
 
 // ── Sync: tasksDelta ─────────────────────────────────────────────────
 // Incremental, 1m schedule. Filters to tasks whose updated_at > last
-// snapshot generated_at we processed. Upserts only — deletes are
-// handled out-of-band by tasksBackfill.
+// snapshot generated_at we processed, then tombstones Notion rows that
+// are absent from the snapshot (within the same cycle).
+//
+// Tombstone guarantees:
+//   - Multi-board safety: only considers Notion rows whose board_slug
+//     matches the snapshot's board field.
+//   - Idempotency: only queries non-archived rows, so re-running after
+//     a tombstone is a no-op (no status flap, no write churn).
+//   - Defensive: if the Notion query fails or credentials are missing,
+//     tombstoning is skipped — upserts still proceed normally.
+//   - Empty snapshot guard: if the gist returns 0 tasks, the cycle
+//     returns early with no changes — it does NOT tombstone everything.
 worker.sync("tasksDelta", {
 	database: tasks,
 	mode: "incremental",
@@ -1054,6 +1312,10 @@ worker.sync("tasksDelta", {
 	execute: async (state) => {
 		const snapshot = await fetchGistSnapshot();
 		if (!snapshot.tasks || snapshot.tasks.length < 1) {
+			// Empty or missing snapshot — return no changes.
+			// IMPORTANT: do NOT tombstone here. An empty snapshot likely means
+			// the gist publisher hasn't run yet or the fetch returned stale data.
+			// Treating "0 tasks" as "delete everything" would be catastrophic.
 			return { changes: [], hasMore: false };
 		}
 		const lastSeen = (state as { last_generated_at?: string } | undefined)
@@ -1061,10 +1323,353 @@ worker.sync("tasksDelta", {
 		const changed = lastSeen
 			? snapshot.tasks.filter((t) => t.updated_at > lastSeen)
 			: snapshot.tasks;
+
+		// Upsert pass: normal delta changes
+		const upsertChanges = changed.map(taskToChange);
+
+		// Tombstone pass: find Notion rows absent from the full snapshot
+		// and mark them archived. Runs every cycle for consistency.
+		const tombstoneChanges = await buildTombstoneChanges(snapshot);
+
 		return {
-			changes: changed.map(taskToChange),
+			changes: [...upsertChanges, ...tombstoneChanges],
 			hasMore: false,
 			nextState: { last_generated_at: snapshot.generated_at },
 		};
+	},
+});
+
+// ── Webhook: kanbanEvent ──────────────────────────────────────────────
+// Receives real-time kanban task events from the local shell hook.
+// Upserts or tombstones individual task rows in the Notion tasks DB
+// using context.notion (direct API writes, NOT managed DB writes).
+// This path provides <5s kanban→Notion latency, replacing the 15m gist
+// + 1m delta polling chain for steady-state updates.
+//
+// Payload shape (sent by local hook):
+//   { event_type: "upsert"|"tombstone"|"bulk_upsert",
+//     kanban_id: string,
+//     board_slug: string,
+//     task_payload?: GistTask,       // present for upsert
+//     tasks?: GistTask[],            // present for bulk_upsert
+//     signature: string }            // HMAC-SHA256 hex of rawBody
+//
+// The gist publisher + tasksDelta sync remain as fallback/drift-correction
+// until card 4.5 decommissions them.
+
+function verifyKanbanSignature(
+	rawBody: string,
+	headers: Record<string, string>,
+): void {
+	const secret = process.env.KANBAN_WEBHOOK_SECRET;
+	if (!secret) {
+		throw new WebhookVerificationError("KANBAN_WEBHOOK_SECRET not configured");
+	}
+
+	const signature = headers["x-kanban-signature-256"];
+	if (!signature?.startsWith("sha256=")) {
+		throw new WebhookVerificationError(
+			"Missing or malformed x-kanban-signature-256 header",
+		);
+	}
+
+	const expected = `sha256=${crypto
+		.createHmac("sha256", secret)
+		.update(rawBody)
+		.digest("hex")}`;
+
+	if (signature.length !== expected.length) {
+		throw new WebhookVerificationError("Invalid kanban webhook signature");
+	}
+
+	if (
+		!crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))
+	) {
+		throw new WebhookVerificationError("Invalid kanban webhook signature");
+	}
+}
+
+/** Build Notion page properties from a GistTask for direct API writes. */
+function taskToNotionProperties(t: GistTask, projectPageId?: string | null) {
+	const isGcd = t["gc'd"] === true;
+
+	const properties: Record<string, any> = {
+		Name: {
+			title: [{ text: { content: t.name } }],
+		},
+		task_id: {
+			rich_text: [{ text: { content: t.task_id } }],
+		},
+		board_slug: {
+			rich_text: [{ text: { content: t.board_slug } }],
+		},
+		status: {
+			select: { name: isGcd ? "archived" : t.status },
+		},
+		assignee: {
+			rich_text: [{ text: { content: t.assignee ?? "" } }],
+		},
+		body: {
+			rich_text: [{ text: { content: truncate(t.body) } }],
+		},
+		parents: {
+			rich_text: [{ text: { content: t.parents.join(",") } }],
+		},
+		children: {
+			rich_text: [{ text: { content: t.children.join(",") } }],
+		},
+		created_at: {
+			date: { start: t.created_at.slice(0, 10) },
+		},
+		updated_at: {
+			date: { start: t.updated_at.slice(0, 10) },
+		},
+		latest_summary: {
+			rich_text: [
+				{
+					text: {
+						content:
+							isGcd && !t.latest_summary
+								? "tombstoned: kanban gc"
+								: truncate(t.latest_summary),
+					},
+				},
+			],
+		},
+	};
+
+	// Set the parent_project relation if we have the resolved Notion page ID.
+	// NOTE: Unlike the sync path (which uses Builder.relation with the primary key
+	// and the platform auto-resolves), the webhook uses context.notion directly
+	// and must pass the actual Notion page UUID.
+	if (projectPageId) {
+		properties.parent_project = {
+			relation: [{ id: projectPageId }],
+		};
+	}
+
+	return properties;
+}
+
+/** Find Notion page ID by task_id in the tasks database. Returns null if not found. */
+async function findTaskPageId(
+	notion: any,
+	tasksDatabaseId: string,
+	taskId: string,
+): Promise<string | null> {
+	const response = await notion.databases.query({
+		database_id: tasksDatabaseId,
+		filter: {
+			property: "task_id",
+			rich_text: { equals: taskId },
+		},
+		page_size: 1,
+	});
+	if (response.results && response.results.length > 0) {
+		return response.results[0].id;
+	}
+	return null;
+}
+
+/**
+ * Resolve a discord_channel_id to a Notion page ID in the projects database.
+ * Uses NOTION_PROJECTS_DATABASE_ID env var. Returns null if not found or not configured.
+ */
+async function resolveProjectPageId(
+	notion: any,
+	channelId: string,
+): Promise<string | null> {
+	const projectsDatabaseId = process.env.NOTION_PROJECTS_DATABASE_ID;
+	if (!projectsDatabaseId) return null;
+	try {
+		const response = await notion.databases.query({
+			database_id: projectsDatabaseId,
+			filter: {
+				property: "discord_channel_id",
+				rich_text: { equals: channelId },
+			},
+			page_size: 1,
+		});
+		if (response.results && response.results.length > 0) {
+			return response.results[0].id;
+		}
+	} catch (err) {
+		console.warn(`resolveProjectPageId: failed for ${channelId}: ${err}`);
+	}
+	return null;
+}
+
+/** Upsert a single task: update existing page or create new one. */
+async function upsertTaskViaNotion(
+	notion: any,
+	tasksDatabaseId: string,
+	task: GistTask,
+): Promise<{ action: "created" | "updated"; task_id: string }> {
+	// Resolve the project page ID for the parent_project relation
+	const channelId = BOARD_TO_CHANNEL[task.board_slug];
+	let projectPageId: string | null = null;
+	if (channelId) {
+		projectPageId = await resolveProjectPageId(notion, channelId);
+	}
+
+	const properties = taskToNotionProperties(task, projectPageId);
+	const existingPageId = await findTaskPageId(
+		notion,
+		tasksDatabaseId,
+		task.task_id,
+	);
+
+	if (existingPageId) {
+		await notion.pages.update({
+			page_id: existingPageId,
+			properties,
+		});
+		return { action: "updated", task_id: task.task_id };
+	} else {
+		await notion.pages.create({
+			parent: { database_id: tasksDatabaseId },
+			properties,
+		});
+		return { action: "created", task_id: task.task_id };
+	}
+}
+
+/** Tombstone a task: set status to "archived" if the page exists. */
+async function tombstoneTaskViaNotion(
+	notion: any,
+	tasksDatabaseId: string,
+	taskId: string,
+): Promise<{ action: "tombstoned" | "not_found"; task_id: string }> {
+	const existingPageId = await findTaskPageId(
+		notion,
+		tasksDatabaseId,
+		taskId,
+	);
+
+	if (!existingPageId) {
+		return { action: "not_found", task_id: taskId };
+	}
+
+	await notion.pages.update({
+		page_id: existingPageId,
+		properties: {
+			status: { select: { name: "archived" } },
+			latest_summary: {
+				rich_text: [{ text: { content: "tombstoned: kanban gc" } }],
+			},
+			updated_at: {
+				date: { start: new Date().toISOString().slice(0, 10) },
+			},
+		},
+	});
+	return { action: "tombstoned", task_id: taskId };
+}
+
+worker.webhook("kanbanEvent", {
+	title: "Kanban Event Webhook",
+	description:
+		"Receives real-time kanban task events (upsert/tombstone) from the local " +
+		"shell hook. Verifies HMAC signature, then writes directly to the Notion " +
+		"tasks database via context.notion. Provides <5s kanban→Notion latency.",
+	execute: async (events, { notion }) => {
+		const tasksDatabaseId = process.env.NOTION_TASKS_DATABASE_ID;
+		if (!tasksDatabaseId) {
+			throw new Error("NOTION_TASKS_DATABASE_ID not configured");
+		}
+
+		for (const event of events) {
+			// Step 1: Verify HMAC signature
+			verifyKanbanSignature(event.rawBody, event.headers);
+
+			// Step 2: Parse and validate payload
+			const payload = event.body as {
+				event_type?: string;
+				kanban_id?: string;
+				board_slug?: string;
+				task_payload?: GistTask;
+				tasks?: GistTask[];
+				signature?: string;
+			};
+
+			const eventType = payload.event_type;
+			if (!eventType) {
+				throw new Error("Missing event_type in webhook payload");
+			}
+
+			// Step 3: Dispatch based on event_type
+			const results: Array<{
+				action: string;
+				task_id: string;
+			}> = [];
+
+			switch (eventType) {
+				case "upsert": {
+					if (!payload.task_payload) {
+						throw new Error(
+							"Missing task_payload for upsert event",
+						);
+					}
+					const result = await upsertTaskViaNotion(
+						notion,
+						tasksDatabaseId,
+						payload.task_payload,
+					);
+					results.push(result);
+					console.log(
+						`kanbanEvent: ${result.action} task ${result.task_id}`,
+					);
+					break;
+				}
+
+				case "tombstone": {
+					if (!payload.kanban_id) {
+						throw new Error(
+							"Missing kanban_id for tombstone event",
+						);
+					}
+					const result = await tombstoneTaskViaNotion(
+						notion,
+						tasksDatabaseId,
+						payload.kanban_id,
+					);
+					results.push(result);
+					console.log(
+						`kanbanEvent: ${result.action} task ${result.task_id}`,
+					);
+					break;
+				}
+
+				case "bulk_upsert": {
+					if (
+						!payload.tasks ||
+						!Array.isArray(payload.tasks) ||
+						payload.tasks.length === 0
+					) {
+						throw new Error(
+							"Missing or empty tasks array for bulk_upsert event",
+						);
+					}
+					for (const task of payload.tasks) {
+						const result = await upsertTaskViaNotion(
+							notion,
+							tasksDatabaseId,
+							task,
+						);
+						results.push(result);
+						console.log(
+							`kanbanEvent: ${result.action} task ${result.task_id}`,
+						);
+					}
+					break;
+				}
+
+				default:
+					throw new Error(`Unknown event_type: ${eventType}`);
+			}
+
+			console.log(
+				`kanbanEvent: processed ${results.length} task(s) for delivery ${event.deliveryId}`,
+			);
+		}
 	},
 });
