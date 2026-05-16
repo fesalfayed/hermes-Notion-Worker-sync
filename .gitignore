@@ -7,3 +7,6 @@ workers.*.json
 workers.json
 verification/
 $HERMES_KANBAN_WORKSPACE/
+_archive/
+local/state/
+local/test_hook_payload.json
