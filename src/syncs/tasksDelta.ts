@@ -45,8 +45,10 @@ export function register(worker: Worker) {
 			// dynamic Notion lookup for newly-added boards).
 			const boardMap = await resolveBoardChannelMap(snapshot);
 
-			// Upsert pass: normal delta changes
-			const upsertChanges = changed.map((t) => taskToChange(t, boardMap));
+			// Upsert pass: only tasks with a resolved channel (parent_project
+			// relation cannot be empty — skip tasks from unmapped boards entirely).
+			const mappedTasks = changed.filter((t) => boardMap[t.board_slug]);
+			const upsertChanges = mappedTasks.map((t) => taskToChange(t, boardMap));
 
 			// Tombstone pass: find Notion rows absent from the full snapshot
 			// and mark them archived. Runs every cycle for consistency.

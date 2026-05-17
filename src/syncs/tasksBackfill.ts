@@ -22,8 +22,14 @@ export function register(worker: Worker) {
 				return { changes: [], hasMore: false };
 			}
 			const boardMap = await resolveBoardChannelMap(snapshot);
+			// Only sync tasks with a resolved channel — parent_project cannot be empty.
+			const mappedTasks = snapshot.tasks.filter((t) => boardMap[t.board_slug]);
+			if (mappedTasks.length < 1) {
+				console.warn("tasksBackfill: no tasks with valid board mapping — aborting.");
+				return { changes: [], hasMore: false };
+			}
 			return {
-				changes: snapshot.tasks.map((t) => taskToChange(t, boardMap)),
+				changes: mappedTasks.map((t) => taskToChange(t, boardMap)),
 				hasMore: false,
 			};
 		},
