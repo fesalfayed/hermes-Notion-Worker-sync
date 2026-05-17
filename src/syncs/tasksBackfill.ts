@@ -1,6 +1,10 @@
 import { Worker } from "@notionhq/workers";
 import { tasks } from "../databases.js";
-import { fetchGistSnapshot, taskToChange } from "../lib/notionHelpers.js";
+import {
+	fetchGistSnapshot,
+	resolveBoardChannelMap,
+	taskToChange,
+} from "../lib/notionHelpers.js";
 
 // ── Sync: tasksBackfill ──────────────────────────────────────────────
 // Replace-mode, manual trigger. Drains the full gist snapshot into the
@@ -17,8 +21,9 @@ export function register(worker: Worker) {
 				console.warn("tasksBackfill: empty gist — aborting to avoid mass-delete.");
 				return { changes: [], hasMore: false };
 			}
+			const boardMap = await resolveBoardChannelMap(snapshot);
 			return {
-				changes: snapshot.tasks.map(taskToChange),
+				changes: snapshot.tasks.map((t) => taskToChange(t, boardMap)),
 				hasMore: false,
 			};
 		},

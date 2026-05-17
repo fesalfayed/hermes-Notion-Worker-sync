@@ -3,6 +3,7 @@ import { tasks } from "../databases.js";
 import {
 	buildTombstoneChanges,
 	fetchGistSnapshot,
+	resolveBoardChannelMap,
 	taskToChange,
 } from "../lib/notionHelpers.js";
 
@@ -40,8 +41,12 @@ export function register(worker: Worker) {
 				? snapshot.tasks.filter((t) => t.updated_at > lastSeen)
 				: snapshot.tasks;
 
+			// Resolve board_slug → channel_id ONCE for this cycle (static map +
+			// dynamic Notion lookup for newly-added boards).
+			const boardMap = await resolveBoardChannelMap(snapshot);
+
 			// Upsert pass: normal delta changes
-			const upsertChanges = changed.map(taskToChange);
+			const upsertChanges = changed.map((t) => taskToChange(t, boardMap));
 
 			// Tombstone pass: find Notion rows absent from the full snapshot
 			// and mark them archived. Runs every cycle for consistency.

@@ -20,10 +20,85 @@ export type GistTask = {
 
 export type GistSnapshot = {
 	version: number;
-	board: string;
+	/** v2: list of board_slugs included in this snapshot. v1: single `board` field. */
+	boards?: string[];
+	board?: string;
 	generated_at: string;
 	tasks: GistTask[];
 };
+
+/**
+ * Resolve board_slug → discord_channel_id for every board present in the
+ * snapshot. Strategy:
+ *   1. Start with the static BOARD_TO_CHANNEL map (loaded from YAML at boot).
+ *   2. For every board_slug NOT in the static map, query the Notion projects
+ *      DB by Name == board_slug. If a row exists, its `discord_channel_id`
+ *      (the primaryKey) is the binding.
+ * This makes new Discord channels auto-bind their kanban boards to Notion
+ * with zero YAML edits or worker redeploys.
+ */
+export async function resolveBoardChannelMap(
+	snapshot: GistSnapshot,
+): Promise<Record<string, string>> {
+	const map: Record<string, string> = { ...BOARD_TO_CHANNEL };
+
+	const allSlugs = new Set(
+		(snapshot.boards ?? [snapshot.board].filter(Boolean) as string[]).concat(
+			snapshot.tasks.map((t) => t.board_slug),
+		),
+	);
+	const unresolved = [...allSlugs].filter((s) => s && !map[s]);
+	if (unresolved.length === 0) return map;
+
+	const notionToken = process.env.NOTION_API_TOKEN;
+	const projectsDataSourceId = process.env.PROJECTS_DATA_SOURCE_ID;
+	if (!notionToken || !projectsDataSourceId) {
+		// Without credentials we can only honour the static YAML map.
+		console.warn(
+			`board-resolver: NOTION_API_TOKEN or PROJECTS_DATA_SOURCE_ID not set — ` +
+				`cannot auto-bind boards: ${unresolved.join(", ")}`,
+		);
+		return map;
+	}
+
+	const headers = {
+		Authorization: `Bearer ${notionToken}`,
+		"Content-Type": "application/json",
+		"Notion-Version": "2025-09-03",
+	};
+
+	for (const slug of unresolved) {
+		try {
+			const res = await fetch(
+				`https://api.notion.com/v1/data_sources/${projectsDataSourceId}/query`,
+				{
+					method: "POST",
+					headers,
+					body: JSON.stringify({
+						filter: { property: "Name", title: { equals: slug } },
+						page_size: 1,
+					}),
+				},
+			);
+			if (!res.ok) continue;
+			const data = (await res.json()) as any;
+			const page = data.results?.[0];
+			if (!page) continue;
+			const channelId =
+				page.properties?.discord_channel_id?.rich_text?.[0]?.plain_text;
+			if (channelId) {
+				map[slug] = channelId;
+				console.log(`board-resolver: auto-bound ${slug} → ${channelId}`);
+			}
+		} catch (err: any) {
+			console.warn(
+				`board-resolver: lookup failed for ${slug}: ${err.message ?? err}`,
+			);
+		}
+	}
+
+	return map;
+}
 
 export function truncate(text: string | null | undefined, max = 2000): string {
 	if (!text) return "";
@@ -49,9 +124,12 @@ export async function fetchGistSnapshot(): Promise<GistSnapshot> {
 	return (await res.json()) as GistSnapshot;
 }
 
-export function taskToChange(t: GistTask) {
+export function taskToChange(
+	t: GistTask,
+	boardMap: Record<string, string> = BOARD_TO_CHANNEL,
+) {
 	const isGcd = t["gc'd"] === true;
-	const channelId = BOARD_TO_CHANNEL[t.board_slug];
+	const channelId = boardMap[t.board_slug];
 	return {
 		type: "upsert" as const,
 		key: t.task_id,
@@ -83,15 +161,15 @@ export function taskToChange(t: GistTask) {
 // Used by tasksDelta to detect orphaned Notion rows that no longer exist
 // in the kanban snapshot and should be tombstoned.
 
-async function fetchNotionTaskIdsForBoard(boardSlug: string): Promise<Set<string>> {
+async function fetchNotionTaskIdsForBoards(
+	boardSlugs: string[],
+): Promise<Set<string>> {
 	const notionToken = process.env.NOTION_API_TOKEN;
 	const tasksDataSourceId = process.env.TASKS_DATA_SOURCE_ID;
 
-	if (!notionToken || !tasksDataSourceId) {
-		// If credentials are missing, skip tombstoning silently —
-		// the upsert path still works without Notion direct access.
+	if (!notionToken || !tasksDataSourceId || boardSlugs.length === 0) {
 		console.warn(
-			"tombstone: NOTION_API_TOKEN or TASKS_DATABASE_ID not configured — skipping tombstone pass"
+			"tombstone: NOTION_API_TOKEN or TASKS_DATABASE_ID not configured — skipping tombstone pass",
 		);
 		return new Set();
 	}
@@ -111,8 +189,10 @@ async function fetchNotionTaskIdsForBoard(boardSlug: string): Promise<Set<string
 			filter: {
 				and: [
 					{
-						property: "board_slug",
-						rich_text: { equals: boardSlug },
+						or: boardSlugs.map((s) => ({
+							property: "board_slug",
+							rich_text: { equals: s },
+						})),
 					},
 					{
 						property: "status",
@@ -171,7 +251,9 @@ export async function buildTombstoneChanges(
 	snapshot: GistSnapshot
 ): Promise<Array<{ type: "upsert"; key: string; properties: any }>> {
 	const snapshotTaskIds = new Set(snapshot.tasks.map((t) => t.task_id));
-	const notionTaskIds = await fetchNotionTaskIdsForBoard(snapshot.board);
+	const boardSlugs =
+		snapshot.boards ?? [snapshot.board].filter(Boolean) as string[];
+	const notionTaskIds = await fetchNotionTaskIdsForBoards(boardSlugs);
 
 	if (notionTaskIds.size === 0) {
 		// Either no rows in Notion yet, or the query failed/was skipped.
