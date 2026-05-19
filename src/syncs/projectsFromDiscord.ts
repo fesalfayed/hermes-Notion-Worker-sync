@@ -8,6 +8,7 @@ import {
 	ARCHIVE_CATEGORY_ID,
 } from "../constants.js";
 import { CHANNEL_TO_BOARD } from "../bindings.js";
+import { fetchGistSnapshot } from "../lib/notionHelpers.js";
 
 // ── Sync: projectsFromDiscord ───────────────────────────────────────
 // Replace-mode sync that fetches Discord PROJECTS category channels and
@@ -59,10 +60,43 @@ export function register(worker: Worker) {
 				);
 			}
 
+			// Runtime board auto-discovery: pull the gist snapshot to learn which
+			// kanban boards exist right now. Any project channel whose `name`
+			// equals an active board_slug is auto-promoted to "In progress" with
+			// `kanban_board_slug` populated — no YAML edit or redeploy required.
+			// This is what makes new project channels work out of the box.
+			//
+			// Falls back gracefully: if the gist is unreachable, we still honor
+			// the static YAML map (CHANNEL_TO_BOARD), so bootstrap-time bindings
+			// continue to work even if the host publisher is down.
+			const activeBoardSlugs = new Set<string>();
+			try {
+				const snapshot = await fetchGistSnapshot();
+				const slugs = snapshot.boards ?? [snapshot.board].filter(Boolean) as string[];
+				for (const s of slugs) activeBoardSlugs.add(s);
+				// Also union in slugs observed in tasks (defensive: snapshot.boards
+				// is the publisher's declared set; tasks[].board_slug is ground truth).
+				for (const t of snapshot.tasks ?? []) {
+					if (t.board_slug) activeBoardSlugs.add(t.board_slug);
+				}
+			} catch (err: any) {
+				console.warn(
+					`projectsFromDiscord: gist snapshot fetch failed — falling back to ` +
+						`static YAML bindings only: ${err.message ?? err}`,
+				);
+			}
+
 			// Convert each channel to a Notion upsert record
 			const changes = projectChannels.map((channel) => {
 				const isArchived = channel.parent_id === ARCHIVE_CATEGORY_ID;
-				const slug = CHANNEL_TO_BOARD[channel.id];
+				// Slug resolution order:
+				//   1. Static YAML binding (CHANNEL_TO_BOARD[channel.id]) —
+				//      explicit override, useful when slug ≠ channel name.
+				//   2. Runtime auto-discovery — channel name equals an active
+				//      kanban board slug. Documented convention: slug == name.
+				const staticSlug = CHANNEL_TO_BOARD[channel.id];
+				const autoSlug = activeBoardSlugs.has(channel.name) ? channel.name : undefined;
+				const slug = staticSlug ?? autoSlug;
 				const props: Record<string, any> & { discord_channel_id: ReturnType<typeof Builder.richText> } = {
 					Name: Builder.title(channel.name),
 					discord_channel_id: Builder.richText(channel.id),
@@ -70,16 +104,16 @@ export function register(worker: Worker) {
 					discord_category_id: Builder.richText(channel.parent_id || ""),
 					discord_archived: Builder.checkbox(isArchived),
 				};
-				// Auto-bind kanban_board_slug from the static binding table.
-				// Writing here is safe because the field is only set when this
-				// channel has a known board mapping — other channels leave it untouched.
+				// Auto-bind kanban_board_slug from the static binding table OR
+				// runtime auto-discovery. Channels with no matching kanban board
+				// leave the field untouched (NOT populated).
 				if (slug) {
 					props.kanban_board_slug = Builder.richText(slug);
 				}
 
 				// Derive project status:
 				//   - Archived Discord channels → "Cancelled"
-				//   - Channel with a kanban board binding → "In progress"
+				//   - Channel with a kanban board binding (static OR auto) → "In progress"
 				//   - Otherwise → "Backlog"
 				// NOTE: This is a coarse heuristic. Fine-grained status
 				// (Done, Paused, Planning) requires kanban board introspection
