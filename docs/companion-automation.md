@@ -8,13 +8,15 @@ If you're forking this repo and don't use Hermes Kanban, you can ignore this doc
 
 ## Why companion automation exists
 
-The Phase 4 worker decommissioned the 1-minute `tasksDelta` poll loop and now only ingests via the `kanbanEvent` webhook. That webhook was originally fired by an in-agent `post_tool_call` hook scoped to a single board, which created three failure modes:
+The Phase 4 worker decommissioned the 1-minute `tasksDelta` poll loop and now ingests primarily via the `kanbanEvent` webhook. The worker also runs runtime board auto-discovery in `projectsFromDiscord` (reads the gist snapshot's `boards` field and the `tasks[].board_slug` set, then promotes any matching Discord channel to `In progress` with `kanban_board_slug` populated) — so **with the worker alone**, new project channels work out of the box as long as `slug == channel name`.
 
-1. **Terminal-created tasks never sync.** `hermes kanban create` from a shell, a script, or a cron-spawned no-agent job writes to the local kanban DB but never invokes the in-agent tool hook → no webhook → silent miss.
-2. **Archive/cancel transitions never propagate.** `hermes kanban archive <id>` doesn't bump `updated_at`, so even a working delta detector can't see archived tasks as deltas. Without explicit `tombstone` events, archived tasks stay forever in Notion.
-3. **New project channels stay at `Backlog`.** `projectsFromDiscord` only promotes a project row to `In progress` when the channel has a binding in `board_channel_map.yaml`. New channels created in Discord just sit at `Backlog` until somebody manually edits the YAML and redeploys.
+What the worker can NOT do from Notion's cloud:
 
-The two scripts below close these loops.
+1. **Watch your local kanban SQLite DB** for new tasks. Without an external emitter, terminal-created tasks (`hermes kanban create` from a shell, a script, or a cron-spawned no-agent job) write to the local DB but never become webhook events.
+2. **Detect archive/cancel transitions.** `hermes kanban archive` doesn't bump `updated_at`, so even a working delta detector can't see archived tasks. Explicit `tombstone` events are required.
+3. **Round-trip new bindings back to git.** Runtime auto-discovery is great for ephemeral channels but leaves `board_channel_map.yaml` out of sync with reality.
+
+The two scripts in [`examples/host-automation/`](../examples/host-automation/) close these loops. Bundled in this repo so any fork can opt in by pointing cron at them.
 
 ---
 

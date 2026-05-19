@@ -108,7 +108,7 @@ hermes-projects-sync/
   - [`board_channel_map.yaml` schema](docs/configuration/board-channel-map.md)
 - [Development](docs/development.md)
 - [Deployment](docs/deployment.md)
-- [Companion automation (host-side)](docs/companion-automation.md) — optional cron-driven helpers that emit `tombstone` events for archived/cancelled tasks and auto-bind new Discord channels to `board_channel_map.yaml` (with auto-deploy).
+- [Companion automation (host-side)](docs/companion-automation.md) — optional cron-driven helpers shipped in [`examples/host-automation/`](examples/host-automation/) that emit `tombstone` events for archived/cancelled tasks and auto-bind new Discord channels to `board_channel_map.yaml` (with auto-deploy). The worker itself **also** auto-discovers new boards at runtime, so out-of-the-box behavior works without these — they're for full round-tripping back to git.
 - [Changelog](CHANGELOG.md)
 
 Upstream Notion docs: <https://developers.notion.com/>.
