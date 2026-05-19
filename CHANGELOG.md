@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- `docs/companion-automation.md` — documents the optional host-side cron scripts (`publish_kanban_gist.py`, `auto_create_kanban_boards.py`) that emit `tombstone`/`upsert` `kanbanEvent`s for tasks created outside the in-agent tool hook (terminal, scripts, cron) and auto-bind new Discord channels to `board_channel_map.yaml` with auto-deploy.
+- Runtime additions to `board_channel_map.yaml` for `vta-rng`, `ambler-drive`, `saved-instagram-curator`, `homerig-roboslav` (auto-bound by `auto_create_kanban_boards.py` after the patch landed).
+
+### Fixed
+- **Silent kanban→Notion ingestion gap for non-`hermes-projects-sync` boards.** The Phase 4 worker only ingests via `kanbanEvent`, which was previously fired by an in-agent `post_tool_call` hook hardcoded to one board. Terminal-created tasks (e.g. `hermes kanban create` on `ambler-drive`) landed in the local SQLite DB and the published gist but never reached Notion. Fixed host-side by extending the 5-minute gist publisher to detect deltas via per-task `updated_at` cursor and POST `bulk_upsert` webhooks. Worker is unchanged; the existing `bulk_upsert` event type already supported this — it just had no caller for non-`hermes-projects-sync` boards.
+- **Archived/cancelled tasks never tombstoned.** `hermes kanban archive` doesn't bump `updated_at`, so even a working delta detector can't see archived tasks. Same publisher now runs a tombstone pass — any task with `status ∈ {archived, cancelled}` not yet in `webhook_tombstone_cursor.json` gets a `tombstone` event POSTed (throttled 200 ms/req, capped 100/tick to avoid 429-flooding). 215 historical archived/cancelled rows drained on first deploy.
+- **New project channels stayed at `Backlog` forever.** `projectsFromDiscord` only promotes a project row to `In progress` when the channel has a YAML binding, but `auto_create_kanban_boards.py` previously only created the kanban board, not the binding. Now also appends to `board_channel_map.yaml` (idempotent, preserves comments) and auto-runs `npm run build && ntn workers deploy && ntn workers sync trigger projectsFromDiscord` non-interactively using the OAuth token from `~/.config/notion/auth.json`. End-to-end: new channel → ≤5 min → kanban board + YAML binding + redeploy + Notion row `In progress`.
+
 ## [0.1.0] - 2026-05-17
 
 ### Added

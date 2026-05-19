@@ -108,6 +108,7 @@ hermes-projects-sync/
   - [`board_channel_map.yaml` schema](docs/configuration/board-channel-map.md)
 - [Development](docs/development.md)
 - [Deployment](docs/deployment.md)
+- [Companion automation (host-side)](docs/companion-automation.md) — optional cron-driven helpers that emit `tombstone` events for archived/cancelled tasks and auto-bind new Discord channels to `board_channel_map.yaml` (with auto-deploy).
 - [Changelog](CHANGELOG.md)
 
 Upstream Notion docs: <https://developers.notion.com/>.
