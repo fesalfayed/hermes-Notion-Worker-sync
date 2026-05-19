@@ -24,3 +24,15 @@ boards:
   hermes-projects-sync:
     channel_id: "1504266202506199272"
     required: true
+  vta-rng:
+    channel_id: "1505337506324021438"
+    required: false
+  ambler-drive:
+    channel_id: "1506095315625705582"
+    required: false
+  saved-instagram-curator:
+    channel_id: "1504560480671498260"
+    required: false
+  homerig-roboslav:
+    channel_id: "1504705726948446349"
+    required: false
