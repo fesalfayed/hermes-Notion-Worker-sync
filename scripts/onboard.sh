@@ -73,7 +73,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 cd "$REPO_ROOT"
 
-printf "${BOLD}hermes-projects-sync onboarding${RESET}  ${DIM}(repo: %s)${RESET}\n" "$REPO_ROOT"
+printf "${BOLD}hermes-notion-worker-sync onboarding${RESET}  ${DIM}(repo: %s)${RESET}\n" "$REPO_ROOT"
 info "Platform: $OS$( [[ $IS_WSL == 1 ]] && printf ' (WSL)')"
 
 # ---------- 1. node version --------------------------------------------------
