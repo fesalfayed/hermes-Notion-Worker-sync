@@ -106,10 +106,14 @@ export function truncate(text: string | null | undefined, max = 2000): string {
 }
 
 export async function fetchGistSnapshot(): Promise<GistSnapshot> {
-	const gistUrl = process.env.KANBAN_GIST_URL;
+	const rawGist = process.env.KANBAN_GIST_URL ?? process.env.KANBAN_TASKS_GIST_ID;
 	const githubToken = process.env.GITHUB_TOKEN;
-	if (!gistUrl) throw new Error("KANBAN_GIST_URL not configured");
+	if (!rawGist) throw new Error("KANBAN_TASKS_GIST_ID (or KANBAN_GIST_URL) not configured");
 	if (!githubToken) throw new Error("GITHUB_TOKEN not configured");
+	// Accept a bare gist ID (no slashes) or a full API URL
+	const gistUrl = rawGist.startsWith("http")
+		? rawGist
+		: `https://api.github.com/gists/${rawGist}`;
 
 	await githubPacer.wait();
 	const res = await fetch(gistUrl, {
