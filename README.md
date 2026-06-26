@@ -1,4 +1,4 @@
-[![CI](https://github.com/fesalfayed/hermes-projects-sync/actions/workflows/ci.yml/badge.svg)](https://github.com/fesalfayed/hermes-projects-sync/actions/workflows/ci.yml)
+[![CI](https://github.com/fesalfayed/hermes-Notion-Worker-sync/actions/workflows/ci.yml/badge.svg)](https://github.com/fesalfayed/hermes-Notion-Worker-sync/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![Node ≥22](https://img.shields.io/badge/node-%E2%89%A522-339933?logo=node.js&logoColor=white)](./package.json)
 [![@notionhq/workers](https://img.shields.io/npm/v/%40notionhq%2Fworkers?label=%40notionhq%2Fworkers&color=000)](https://www.npmjs.com/package/@notionhq/workers)
@@ -21,6 +21,13 @@ ntn workers deploy
 ```
 
 No token? `npm run onboard` opens <https://www.notion.so/profile/integrations/internal>.
+
+## What this demonstrates
+
+- Event-driven workflow sync across Discord and Notion.
+- Managed database writes with `@notionhq/workers`.
+- HMAC-verified webhook delivery plus durable gist replay.
+- Thin orchestrator design: syncs and tools stay small, typed, and testable.
 
 ## Surface
 
